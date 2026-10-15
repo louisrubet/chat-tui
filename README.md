@@ -2,15 +2,11 @@
 
 The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal-tui) and google-messages-tui, as a library: each client brings its service, chat-tui does the rest.
 
-![A chat with photos, link previews, emojis and reactions](docs/screenshots/chat.png)
-
 - **Chat list** with pinned chats and unread counts
 - **Discussions**: replies, forwards, deletion, `**bold**` `*italic*` `~strikethrough~`
 - **Images** as thumbnails (kitty graphics protocol), pasted with `Ctrl+V`, opened with `o`
 - **Link previews**, desktop notifications, typing indicators
 - **Emojis**: reactions, fuzzy `:shortcode` picker (fzf style)
-
-<sub>Photos: Wikimedia Commons, CC BY-SA, credits in [examples/demo](examples/demo/README.md).</sub>
 
 ## Use
 
