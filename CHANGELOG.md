@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0
+
+Stable API: same as v0.1.0, now used by signal-tui.
+
 ## v0.1.0
 
 First release, extracted from signal-tui v1.3.1.

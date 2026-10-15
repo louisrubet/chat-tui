@@ -12,7 +12,7 @@ The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal
 
 ```toml
 [dependencies]
-chat-tui = { git = "https://github.com/louisrubet/chat-tui", tag = "v0.1.0" }
+chat-tui = { git = "https://github.com/louisrubet/chat-tui", tag = "v1.0.0" }
 ```
 
 Implement [`Backend`](src/backend.rs) for your service, load the chats, then run:
@@ -42,7 +42,7 @@ Any terminal works; thumbnails need the kitty graphics protocol with Unicode pla
 
 ## Versions
 
-Tagged `vX.Y.Z`, clients pin a tag. Before 1.0, a minor bump (`0.1` → `0.2`) may break the API: see the [changelog](CHANGELOG.md).
+Tagged `vX.Y.Z` (semver), clients pin a tag: a major bump breaks the API, see the [changelog](CHANGELOG.md).
 
 To work on chat-tui and a client together, point the client at a checkout, without committing it:
 
