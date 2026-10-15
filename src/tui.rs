@@ -1,7 +1,7 @@
 //! The terminal interface: discussion list, discussion view, compose and forward screens.
 //!
 //! [`App`] holds the state and draws it; [`App::handle_key`] turns key presses into
-//! [`Action`]s that the caller carries out (sending through Signal, or locally for the mock).
+//! [`Action`]s, that [`crate::run`] carries out through the backend.
 
 use std::fs;
 use std::io::{self, Write, stdout};
@@ -20,6 +20,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+use crate::backend::Capabilities;
 use crate::data::{self, Discussion, Message, Styled};
 use crate::editor::Editor;
 use crate::fuzzy;
@@ -260,6 +261,11 @@ struct Picker {
 /// Without news, someone is no longer shown typing after this (as Signal clients do).
 const TYPING_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Where attachments are written to be opened.
+fn attachments_dir() -> PathBuf {
+    std::env::temp_dir().join("chat-tui")
+}
+
 /// Someone typing in a discussion, until `until`.
 struct Typing {
     discussion: usize,
@@ -283,6 +289,8 @@ pub struct App {
     message_page: usize,
     /// Image thumbnails shown in the discussions (off unless the terminal supports them).
     pub thumbnails: Thumbnails,
+    /// What the backend can do.
+    pub capabilities: Capabilities,
 }
 
 impl App {
@@ -301,6 +309,7 @@ impl App {
             list_page: 10,
             message_page: 5,
             thumbnails: Thumbnails::default(),
+            capabilities: Capabilities::default(),
         }
     }
 
@@ -323,7 +332,12 @@ impl App {
         Some((message, quoted))
     }
 
-    fn attachment_path(message_id: u64, index: usize, attachment: &data::Attachment) -> PathBuf {
+    fn attachment_path(message_id: &str, index: usize, attachment: &data::Attachment) -> PathBuf {
+        // Ids come from the backend: only safe characters in the file name.
+        let message_id: String = message_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "-_".contains(*c))
+            .collect();
         let from_name = attachment
             .file_name
             .as_deref()
@@ -336,14 +350,11 @@ impl App {
             "image/png" => "png",
             _ => from_name.unwrap_or("bin"),
         };
-        std::env::temp_dir()
-            .join("signal-tui")
-            .join(format!("{message_id}-{index}.{extension}"))
+        attachments_dir().join(format!("{message_id}-{index}.{extension}"))
     }
 
     fn write_openable_attachments(message: &Message) -> Vec<String> {
-        let dir = std::env::temp_dir().join("signal-tui");
-        if fs::create_dir_all(&dir).is_err() {
+        if fs::create_dir_all(attachments_dir()).is_err() {
             return Vec::new();
         }
         message
@@ -351,7 +362,7 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(index, attachment)| {
-                let path = Self::attachment_path(message.id, index, attachment);
+                let path = Self::attachment_path(&message.id, index, attachment);
                 fs::write(&path, &attachment.bytes).ok()?;
                 Some(path.to_string_lossy().into_owned())
             })
@@ -475,6 +486,30 @@ impl App {
         }
     }
 
+    /// Opens discussion `idx`, on its first new message, below a "N new messages" line.
+    pub fn open(&mut self, idx: usize) -> Action {
+        let discussion = &mut self.discussions[idx];
+        let new_from = discussion
+            .first_unread()
+            .map(|first| (first, discussion.unread));
+        let selected_msg = new_from
+            .map_or(discussion.messages.len().saturating_sub(1), |(first, _)| {
+                first
+            });
+        discussion.unread = 0;
+        self.screen = Screen::Discussion {
+            discussion_idx: idx,
+            selected_msg,
+            selecting: false,
+            scroll: 0,
+            composing: None,
+            reacting: None,
+            deleting: false,
+            new_from,
+        };
+        Action::Opened(idx)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.kind != KeyEventKind::Press {
             return None;
@@ -484,27 +519,7 @@ impl App {
             && key.code == KeyCode::Enter
             && selected < self.discussions.len()
         {
-            // Opens on the first new message, below a "N new messages" line.
-            let discussion = &mut self.discussions[selected];
-            let new_from = discussion
-                .first_unread()
-                .map(|first| (first, discussion.unread));
-            let selected_msg = new_from
-                .map_or(discussion.messages.len().saturating_sub(1), |(first, _)| {
-                    first
-                });
-            discussion.unread = 0;
-            self.screen = Screen::Discussion {
-                discussion_idx: selected,
-                selected_msg,
-                selecting: false,
-                scroll: 0,
-                composing: None,
-                reacting: None,
-                deleting: false,
-                new_from,
-            };
-            return Some(Action::Opened(selected));
+            return Some(self.open(selected));
         }
         let discussions = &self.discussions;
 
@@ -767,14 +782,21 @@ impl App {
                                 && messages.get(*selected_msg).is_none_or(|m| m.deleted) => {}
                         KeyCode::Delete if *selecting => {
                             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-                            if messages[*selected_msg].deletable(now_ms) {
-                                *deleting = true;
-                            } else {
-                                self.status = Some(
-                                    "Only your messages of the last 24 h can be deleted"
-                                        .to_string(),
-                                );
-                            }
+                            self.status = match self.capabilities.delete_max_age {
+                                None => Some("Messages cannot be deleted here".to_string()),
+                                Some(max_age) => {
+                                    let max_age_ms = max_age.as_millis() as u64;
+                                    if messages[*selected_msg].deletable(now_ms, max_age_ms) {
+                                        *deleting = true;
+                                        None
+                                    } else {
+                                        Some(format!(
+                                            "Only your messages of the last {} h can be deleted",
+                                            max_age.as_secs() / 3600
+                                        ))
+                                    }
+                                }
+                            };
                         }
                         KeyCode::Char('e') if *selecting => *reacting = Some(Picker::default()),
                         KeyCode::Char('r') if *selecting => {
@@ -1533,7 +1555,9 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(data::mock_discussions())
+        let mut app = App::new(data::mock_discussions());
+        app.capabilities.delete_max_age = Some(Duration::from_secs(24 * 60 * 60));
+        app
     }
 
     /// Opens the first discussion (last message selected).
@@ -2084,7 +2108,7 @@ mod tests {
     #[test]
     fn page_keys_jump_a_page_of_chats() {
         let titles: Vec<Discussion> = (0..50)
-            .map(|i| Discussion::new(format!("Chat {i}")))
+            .map(|i| Discussion::new(i.to_string(), format!("Chat {i}")))
             .collect();
         let mut app = App::new(titles);
         let mut out = Vec::new();
@@ -2099,7 +2123,7 @@ mod tests {
 
         let mut app = App::new(
             (0..5)
-                .map(|i| Discussion::new(format!("Chat {i}")))
+                .map(|i| Discussion::new(i.to_string(), format!("Chat {i}")))
                 .collect(),
         );
         app.handle_key(key(KeyCode::PageDown));
@@ -2112,7 +2136,7 @@ mod tests {
 
     #[test]
     fn page_keys_jump_a_page_of_messages() {
-        let mut discussion = Discussion::new("Long".to_string());
+        let mut discussion = Discussion::new("long", "Long");
         discussion.messages = (0..40)
             .map(|i| Message::mine(i, format!("message {i}"), None, false))
             .collect();

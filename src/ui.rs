@@ -242,7 +242,7 @@ fn push_media(
     };
 
     for (i, preview) in m.previews.iter().enumerate() {
-        if let Some(thumb) = thumbnails.preview(m.id, i) {
+        if let Some(thumb) = thumbnails.preview(&m.id, i) {
             image(out, thumb);
         }
         let bar = "\u{2502} ";
@@ -288,7 +288,7 @@ fn push_media(
         return;
     }
     for (i, attachment) in m.attachments.iter().enumerate() {
-        match thumbnails.get(m.id, i) {
+        match thumbnails.get(&m.id, i) {
             Some(Some(thumb)) => image(out, thumb),
             Some(None) => out.push(text("[error loading image]".to_string())),
             None => out.push(text(attachment_label(&attachment.content_type, None))),
@@ -444,7 +444,7 @@ mod tests {
         }];
         let discussion = Discussion {
             messages: vec![message],
-            ..Discussion::new("t".to_string())
+            ..Discussion::new("t", "t")
         };
         let lines = build_discussion_lines(&discussion, 7, None, &Thumbnails::default());
         let texts: Vec<_> = lines
@@ -517,7 +517,7 @@ mod tests {
         }];
         let discussion = Discussion {
             messages: vec![message],
-            ..Discussion::new("t".to_string())
+            ..Discussion::new("t", "t")
         };
         let lines = build_discussion_lines(&discussion, 40, None, &Thumbnails::default());
         let card = &texts(&lines)[2..5];
@@ -545,7 +545,7 @@ mod tests {
         message.remote_attachments = vec!["image/jpeg".to_string()];
         let mut discussion = Discussion {
             messages: vec![message],
-            ..Discussion::new("t".to_string())
+            ..Discussion::new("t", "t")
         };
         let lines = build_discussion_lines(&discussion, 40, None, &Thumbnails::on());
         assert_eq!(

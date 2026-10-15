@@ -1,129 +1,116 @@
-//! The interface with fake discussions, no Signal involved: sending only appends locally.
+//! The interface with fake chats, no network: sending only appends locally.
 //!
 //!   cargo run --example mock_tui            # `-- --open` opens the first chat
+//!
+//! Its state (pins, read marks, settings) goes to a temporary directory.
 
-use std::io::{self, Write, stdout};
+use std::future::Future;
+use std::io;
+use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal;
-use signal_tui::data::{self, Message};
-use signal_tui::graphics::Thumbnails;
-use signal_tui::tui::{Action, App, TerminalGuard};
+use chat_tui::backend::Result;
+use chat_tui::data::{self, ChatId, Message};
+use chat_tui::{Backend, Capabilities, Config, Downloaded, Draft};
 
-fn main() -> io::Result<()> {
-    let mut discussions = data::mock_discussions();
-    discussions[0].pinned = Some(1);
-    discussions.insert(0, demo::discussion());
-    let mut app = App::new(discussions);
-    app.thumbnails = Thumbnails::detect();
-    if std::env::args().any(|arg| arg == "--open") {
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    }
-    let _terminal = TerminalGuard::enter()?;
-    let mut out = stdout();
-    // Message ids are send times in ms, as in Signal (deletion is allowed for 24 h).
-    let mut next_id = chrono::Utc::now().timestamp_millis() as u64;
+/// Sends locally, and has nothing to download.
+struct Mock;
 
-    loop {
-        let (w, h) = terminal::size()?;
-        app.draw(&mut out, w, h)?;
-        out.flush()?;
-
-        let action = match event::read()? {
-            Event::Key(key) => app.handle_key(key),
-            Event::Paste(text) => {
-                app.handle_paste(&text);
-                None
-            }
-            _ => None,
-        };
-        match action {
-            Some(Action::Quit) => return app.thumbnails.clear(&mut out),
-            Some(Action::Delete { discussion, msg }) => {
-                app.discussions[discussion].messages[msg].mark_deleted()
-            }
-            Some(Action::React {
-                discussion,
-                msg,
-                emoji,
-                remove,
-            }) => {
-                let emoji = (!remove).then_some(emoji.as_str());
-                app.discussions[discussion].messages[msg].set_reaction("me", true, emoji);
-            }
-            Some(
-                Action::Opened(_)
-                | Action::SettingsChanged
-                | Action::PinToggled(_)
-                | Action::FetchAttachments { .. },
-            ) => {}
-            Some(Action::PasteImageFromClipboard) => {
-                app.handle_pasted_image(data::Attachment::from_clipboard().unwrap_or_else(gradient))
-            }
-            Some(Action::Send {
-                discussion,
-                text,
-                styles,
-                reply_to,
-            }) => {
-                let mut message = Message::mine(next_id, text, reply_to, false);
-                message.styles = styles;
-                app.push_message(discussion, message);
-                next_id += 1;
-            }
-            Some(Action::SendWithAttachments {
-                discussion,
-                text,
-                attachments,
-                reply_to,
-            }) => {
-                let attachment_count = attachments.len();
-                let mut message = Message::mine(next_id, text, reply_to, false);
-                message.attachments = attachments;
-                if attachment_count > 0 {
-                    app.set_status(format!("Mock sent {attachment_count} attachment(s)"));
-                }
-                app.push_message(discussion, message);
-                next_id += 1;
-            }
-            Some(Action::Forward { from, msg, to }) => {
-                let original = &app.discussions[from].messages[msg];
-                let mut message = Message::mine(next_id, original.text.clone(), None, true);
-                message.styles = original.styles.clone();
-                app.push_message(to, message);
-                next_id += 1;
-                app.set_status(format!("Forwarded to {}", app.discussions[to].title));
-            }
-            None => {}
+// `async fn` would borrow `self` and the arguments: the trait wants `'static` futures.
+#[allow(clippy::manual_async_fn)]
+impl Backend for Mock {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            delete_max_age: Some(Duration::from_secs(24 * 60 * 60)),
         }
+    }
+
+    fn send(
+        &self,
+        _chat: &ChatId,
+        draft: Draft,
+    ) -> impl Future<Output = Result<Message>> + 'static {
+        async move {
+            let id = chrono::Utc::now().timestamp_millis();
+            let mut message = Message::mine(id, draft.text, None, draft.forwarded);
+            message.styles = draft.styles;
+            message.attachments = draft.attachments;
+            Ok(message)
+        }
+    }
+
+    fn react(
+        &self,
+        _chat: &ChatId,
+        _message: &Message,
+        _emoji: &str,
+        _remove: bool,
+    ) -> impl Future<Output = Result<()>> + 'static {
+        async { Ok(()) }
+    }
+
+    fn delete(
+        &self,
+        _chat: &ChatId,
+        _message: &Message,
+    ) -> impl Future<Output = Result<()>> + 'static {
+        async { Ok(()) }
+    }
+
+    fn download(
+        &self,
+        _chat: &ChatId,
+        _message: &Message,
+    ) -> impl Future<Output = Result<Downloaded>> + 'static {
+        async { Err("nothing to download in the mock".into()) }
     }
 }
 
-/// A color gradient, pasted when the clipboard holds no image.
-fn gradient() -> data::Attachment {
-    let (width, height) = (320, 200);
-    let image = image::RgbImage::from_fn(width, height, |x, y| {
-        image::Rgb([(x * 255 / width) as u8, (y * 255 / height) as u8, 160])
-    });
-    let mut bytes = Vec::new();
-    image
-        .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-        .expect("PNG encoding");
-    data::Attachment {
-        content_type: "image/png".to_string(),
-        file_name: None,
-        bytes,
-        width: Some(width),
-        height: Some(height),
-    }
+fn main() -> io::Result<()> {
+    let mut discussions = data::mock_discussions();
+    discussions.insert(0, demo::discussion());
+
+    // The pins and unread counts above, as the state files `run` reads them from.
+    let state = std::env::temp_dir().join(format!("chat-tui-mock-{}", std::process::id()));
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(state.join("pinned"), "lisbon\nalice\n")?;
+    let marks: String = discussions
+        .iter()
+        .map(|d| {
+            let first = d.first_unread().unwrap_or(d.messages.len());
+            let read = first.checked_sub(1).map_or(0, |i| d.messages[i].sent_ms);
+            format!("{} {read}\n", d.id)
+        })
+        .collect();
+    std::fs::write(state.join("read"), marks)?;
+    let config = Config {
+        name: "chat-tui mock".to_string(),
+        settings: state.join("settings"),
+        read_marks: state.join("read"),
+        pins: state.join("pinned"),
+        open: std::env::args()
+            .any(|arg| arg == "--open")
+            .then(|| "lisbon".to_string()),
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(tokio::task::LocalSet::new().run_until(chat_tui::run(
+        Mock,
+        discussions,
+        futures::stream::pending(),
+        config,
+    )));
+    let _ = std::fs::remove_dir_all(&state);
+    result
 }
 
 /// A chat showing what the interface can do: photos, link previews, emojis, reactions
 /// (the screenshot of the README).
 mod demo {
+    use chat_tui::data::{Attachment, Discussion, LinkPreview, Message, Style, Styled};
     use chrono::{Duration, Local, NaiveTime};
     use image::{Rgb, RgbImage};
-    use signal_tui::data::{Attachment, Discussion, LinkPreview, Message, Style, Styled};
 
     pub fn discussion() -> Discussion {
         let today = Local::now().date_naive();
@@ -209,12 +196,14 @@ mod demo {
             app,
             tram,
         ];
-        // Ids are send times, as in Signal.
         for message in &mut messages {
-            message.id = message.timestamp.and_utc().timestamp_millis() as u64;
+            message.sent_ms = message.timestamp.and_utc().timestamp_millis() as u64;
+            message.id = message.sent_ms.to_string();
         }
         Discussion {
+            id: "lisbon".to_string(),
             title: "Lisbon trip \u{1f30d}".to_string(),
+            is_group: true,
             messages,
             unread: 1,
             pinned: Some(0),

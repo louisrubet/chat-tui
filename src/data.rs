@@ -1,9 +1,18 @@
+//! The chats and their messages, as the interface shows them.
+
 use chrono::NaiveDateTime;
 
+/// Identifies a chat for its backend (a Signal conversation, a Google Messages thread…).
+pub type ChatId = String;
+/// Identifies a message in its chat, for its backend.
+pub type MessageId = String;
+
+#[derive(Debug, Clone)]
 pub struct Message {
-    /// Signal message id: the sender's timestamp in milliseconds (what quotes refer to).
-    pub id: u64,
-    /// ACI of the author, needed to quote the message.
+    pub id: MessageId,
+    /// When it was sent, in milliseconds since the Unix epoch.
+    pub sent_ms: u64,
+    /// Its author for the backend (needed to quote it, to match deletions), `None` for ours.
     pub author: Option<String>,
     pub from_me: bool,
     pub sender_name: String,
@@ -40,10 +49,7 @@ pub struct LinkPreview {
     pub remote_image: bool,
 }
 
-/// How long after sending a message can be deleted for everyone (Signal's default limit).
-pub const DELETE_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
-
-/// File or image data attached to a Signal message.
+/// File or image data attached to a message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attachment {
     pub content_type: String,
@@ -77,7 +83,7 @@ impl Attachment {
     }
 }
 
-/// Text formatting, as Signal sends it.
+/// Text formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
     Bold,
@@ -112,7 +118,7 @@ pub fn trim_styled(text: &str, styles: &[Styled]) -> (String, Vec<Styled>) {
 /// An emoji reaction to a message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reaction {
-    /// ACI of who reacted.
+    /// Who reacted, for the backend.
     pub author: String,
     pub emoji: String,
     /// Our own reaction (from this device or another).
@@ -121,9 +127,10 @@ pub struct Reaction {
 
 impl Message {
     /// A message written here, sent now.
-    pub fn mine(id: u64, text: String, reply_to: Option<usize>, forwarded: bool) -> Self {
+    pub fn mine(id: impl ToString, text: String, reply_to: Option<usize>, forwarded: bool) -> Self {
         Message {
-            id,
+            id: id.to_string(),
+            sent_ms: chrono::Utc::now().timestamp_millis() as u64,
             author: None,
             from_me: true,
             sender_name: String::new(),
@@ -231,9 +238,10 @@ impl Message {
         (prefix + &self.text, styles)
     }
 
-    /// Whether we can delete it for everyone at `now_ms`: ours, sent less than 24 h ago.
-    pub fn deletable(&self, now_ms: u64) -> bool {
-        self.from_me && !self.deleted && now_ms.saturating_sub(self.id) < DELETE_MAX_AGE_MS
+    /// Whether we can delete it for everyone at `now_ms`: ours, sent less than `max_age_ms`
+    /// ago.
+    pub fn deletable(&self, now_ms: u64, max_age_ms: u64) -> bool {
+        self.from_me && !self.deleted && now_ms.saturating_sub(self.sent_ms) < max_age_ms
     }
 
     /// Deleted for everyone: its text and reactions go away.
@@ -245,9 +253,11 @@ impl Message {
         self.previews.clear();
     }
 
-    /// Sets the reaction of `author` (replacing theirs), or removes it with `None`.
+    /// Sets the reaction of `author` (replacing theirs, or ours when `mine`), or removes it
+    /// with `None`.
     pub fn set_reaction(&mut self, author: &str, mine: bool, emoji: Option<&str>) {
-        self.reactions.retain(|r| r.author != author);
+        self.reactions
+            .retain(|r| r.author != author && !(mine && r.mine));
         if let Some(emoji) = emoji {
             self.reactions.push(Reaction {
                 author: author.to_string(),
@@ -291,8 +301,12 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Discussion {
+    pub id: ChatId,
     pub title: String,
+    /// Several people besides us: their names go with their messages.
+    pub is_group: bool,
     pub messages: Vec<Message>,
     /// Number of messages received since it was last opened.
     pub unread: usize,
@@ -319,9 +333,11 @@ impl Discussion {
         None
     }
 
-    pub fn new(title: String) -> Self {
+    pub fn new(id: impl Into<ChatId>, title: impl Into<String>) -> Self {
         Discussion {
-            title,
+            id: id.into(),
+            title: title.into(),
+            is_group: false,
             messages: Vec::new(),
             unread: 0,
             pinned: None,
@@ -342,8 +358,8 @@ impl Discussion {
         self.first_attachment(self.messages.len())
     }
 
-    /// Index of the message with this Signal id.
-    pub fn position_of(&self, id: u64) -> Option<usize> {
+    /// Index of the message with this id.
+    pub fn position_of(&self, id: &str) -> Option<usize> {
         self.messages.iter().rposition(|m| m.id == id)
     }
 }
@@ -376,8 +392,10 @@ fn dt(s: &str) -> NaiveDateTime {
 
 fn msg(from_me: bool, sender_name: &str, text: &str, ts: &str) -> Message {
     let timestamp = dt(ts);
+    let sent_ms = timestamp.and_utc().timestamp_millis() as u64;
     Message {
-        id: timestamp.and_utc().timestamp_millis() as u64,
+        id: sent_ms.to_string(),
+        sent_ms,
         author: None,
         from_me,
         sender_name: sender_name.to_string(),
@@ -398,7 +416,9 @@ fn msg(from_me: bool, sender_name: &str, text: &str, ts: &str) -> Message {
 pub fn mock_discussions() -> Vec<Discussion> {
     vec![
         Discussion {
+            id: "alice".to_string(),
             title: "Alice Martin".to_string(),
+            is_group: false,
             unread: 0,
             pinned: Some(0),
             messages: vec![
@@ -413,7 +433,9 @@ pub fn mock_discussions() -> Vec<Discussion> {
             ],
         },
         Discussion {
+            id: "family".to_string(),
             title: "Family Group".to_string(),
+            is_group: true,
             unread: 2,
             pinned: None,
             messages: vec![
@@ -424,7 +446,9 @@ pub fn mock_discussions() -> Vec<Discussion> {
             ],
         },
         Discussion {
+            id: "bob".to_string(),
             title: "Bob Dupont".to_string(),
+            is_group: false,
             unread: 0,
             pinned: None,
             messages: vec![
@@ -455,7 +479,9 @@ pub fn mock_discussions() -> Vec<Discussion> {
             .collect(),
         },
         Discussion {
+            id: "chloe".to_string(),
             title: "Chloe Renard".to_string(),
+            is_group: false,
             unread: 0,
             pinned: None,
             messages: vec![
@@ -481,7 +507,7 @@ mod tests {
 
     #[test]
     fn attachments_are_labelled_in_discussion_order() {
-        let mut discussion = Discussion::new("Alice".to_string());
+        let mut discussion = Discussion::new("alice", "Alice");
         let mut photo = Message::mine(1, String::new(), None, false);
         photo.remote_attachments = vec!["image/jpeg".to_string(), "application/pdf".to_string()];
         let mut captioned = Message::mine(2, "look".to_string(), None, false);

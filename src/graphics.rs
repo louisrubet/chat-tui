@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use image::ImageFormat;
 
-use crate::data::Message;
+use crate::data::{Message, MessageId};
 
 /// Width of a thumbnail in pixels, as in Signal Desktop: from 200 to 300, the height
 /// following up to 450.
@@ -71,7 +71,7 @@ pub struct Thumbnails {
     cell: (u32, u32),
     next_id: u32,
     /// By (message id, attachment index); `None` when it cannot be shown.
-    thumbs: HashMap<(u64, usize), Option<Thumb>>,
+    thumbs: HashMap<(MessageId, usize), Option<Thumb>>,
 }
 
 impl Thumbnails {
@@ -113,12 +113,12 @@ impl Thumbnails {
 
     /// The thumbnail of attachment `index` of message `message_id`: `None` if not made
     /// yet, `Some(None)` if the image cannot be shown.
-    pub fn get(&self, message_id: u64, index: usize) -> Option<Option<Thumb>> {
-        self.thumbs.get(&(message_id, index)).copied()
+    pub fn get(&self, message_id: &str, index: usize) -> Option<Option<Thumb>> {
+        self.thumbs.get(&(message_id.to_string(), index)).copied()
     }
 
     /// The thumbnail of the image of link preview `index` of message `message_id`.
-    pub fn preview(&self, message_id: u64, index: usize) -> Option<Thumb> {
+    pub fn preview(&self, message_id: &str, index: usize) -> Option<Thumb> {
         self.get(message_id, PREVIEWS + index).flatten()
     }
 
@@ -141,7 +141,7 @@ impl Thumbnails {
                 .filter_map(|(i, p)| p.image.as_ref().map(|image| (PREVIEWS + i, image, true)));
             for (index, attachment, preview) in attachments.chain(previews) {
                 if !attachment.content_type.starts_with("image/")
-                    || self.thumbs.contains_key(&(message.id, index))
+                    || self.thumbs.contains_key(&(message.id.clone(), index))
                 {
                     continue;
                 }
@@ -158,7 +158,7 @@ impl Thumbnails {
                     }
                     None => None,
                 };
-                self.thumbs.insert((message.id, index), thumb);
+                self.thumbs.insert((message.id.clone(), index), thumb);
             }
         }
         Ok(())

@@ -1,7 +1,8 @@
-//! User settings, saved as `key = value` lines in `~/.config/signal-tui/settings`.
+//! User settings, saved as `key = value` lines (in `~/.config/<app>/settings`, see
+//! [`crate::Config`]).
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -18,16 +19,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// `$XDG_CONFIG_HOME/signal-tui/settings`, or `~/.config/signal-tui/settings`.
-    pub fn default_path() -> io::Result<PathBuf> {
-        let config_dir = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| io::Error::other("neither XDG_CONFIG_HOME nor HOME is set"))?;
-        Ok(config_dir.join("signal-tui").join("settings"))
-    }
-
     /// Loads the settings; a missing file or unknown lines leave the defaults.
     pub fn load(path: &Path) -> Self {
         let mut settings = Settings::default();
@@ -57,7 +48,7 @@ mod tests {
     #[test]
     fn save_and_load() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("signal-tui").join("settings");
+        let path = dir.path().join("app").join("settings");
         assert_eq!(Settings::load(&path), Settings::default());
 
         let settings = Settings {
