@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0
+
+- Esc gives up a message being sent, whatever blocks it: "Sending cancelled" in the status line, the interface free again.
+- `mock_tui`: a message starting with `/hang` is never sent, to try it.
+
 ## v1.1.2
 
 - No panic drawing the chat list or the parameters in a terminal of no rows.
