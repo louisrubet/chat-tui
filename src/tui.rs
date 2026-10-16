@@ -1338,7 +1338,12 @@ fn draw_list(
         print_row(out, y as u16, &text, false)?;
     }
 
-    print_row(out, (height - 1) as u16, &ui::pad_left(help, width), false)?;
+    print_row(
+        out,
+        height.saturating_sub(1) as u16,
+        &ui::pad_left(help, width),
+        false,
+    )?;
     Ok(())
 }
 
@@ -1366,7 +1371,7 @@ fn draw_settings(
     let help = "\u{2191}/\u{2193} select   Space/Enter toggle   Esc back   q quit";
     print_row(
         out,
-        (height - 1) as u16,
+        height.saturating_sub(1) as u16,
         &ui::pad_left(status.unwrap_or(help), width),
         false,
     )?;
