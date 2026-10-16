@@ -237,7 +237,15 @@ pub async fn run(
                     app.set_status("Disconnected: restart to receive new messages");
                     continue;
                 };
+                // History come after the chat was opened: its images too.
+                let history_of = match &event {
+                    Event::History { chat, .. } if history_fetched.contains(chat) => Some(chat.clone()),
+                    _ => None,
+                };
                 handle_event(&mut app, event, &mut read_marks, &config);
+                if let Some(idx) = history_of.and_then(|chat| app.discussions.iter().position(|d| d.id == chat)) {
+                    fetch_history_images(&backend, &app.discussions[idx], &fetched_tx);
+                }
             }
         }
     }

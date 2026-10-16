@@ -1220,16 +1220,16 @@ fn order(discussions: &[Discussion]) -> Vec<usize> {
     pinned.into_iter().chain(others).collect()
 }
 
-/// `n` new messages as a circled number (① to ㊿), "50+" beyond, nothing for none.
+/// `n` new messages: a circled number from ① to ⑳, digits beyond ("21", "99+"), nothing
+/// for none. Not ㉑ and above: they take two columns where ① to ⑳ take one, and would
+/// stick out on the left.
 fn unread_badge(n: usize) -> String {
-    let circled = match n {
-        0 => return String::new(),
-        1..=20 => 0x2460 + n - 1,
-        21..=35 => 0x3251 + n - 21,
-        36..=50 => 0x32b1 + n - 36,
-        _ => return "50+".to_string(),
-    };
-    char::from_u32(circled as u32).map_or_else(|| n.to_string(), String::from)
+    match n {
+        0 => String::new(),
+        1..=20 => char::from_u32(0x2460 + n as u32 - 1).map_or_else(|| n.to_string(), String::from),
+        21..=99 => n.to_string(),
+        _ => "99+".to_string(),
+    }
 }
 
 /// The discussion `delta` places away from `selected` in display order (clamped).
@@ -1324,7 +1324,7 @@ fn draw_list(
                 } else {
                     discussion.title.clone()
                 };
-                // Number of new messages in front, right-aligned in a 4-column prefix: "  ③ ", "50+ ".
+                // Number of new messages in front, right-aligned in a 4-column prefix: "  ③ ", "99+ ".
                 let text = format!(
                     "{} {}",
                     ui::pad_right(&unread_badge(discussion.unread), 3),
@@ -2413,9 +2413,12 @@ mod tests {
         assert_eq!(unread_badge(0), "");
         assert_eq!(unread_badge(1), "\u{2460}");
         assert_eq!(unread_badge(20), "\u{2473}");
-        assert_eq!(unread_badge(21), "\u{3251}");
-        assert_eq!(unread_badge(50), "\u{32bf}");
-        assert_eq!(unread_badge(51), "50+");
+        assert_eq!(unread_badge(21), "21");
+        assert_eq!(unread_badge(99), "99");
+        assert_eq!(unread_badge(100), "99+");
+        for n in 1..=100 {
+            assert!(ui::width_of(&unread_badge(n)) <= 3, "fits the prefix");
+        }
     }
 
     /// A message `id` sent at `ms`, from someone else.
