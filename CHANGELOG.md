@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0
+
+- `Event::History`: earlier messages of a chat, merged with those shown (known ones replaced, send order kept), without notifying. Selection, quotes and the reply being written keep pointing to their message.
+
 ## v1.0.0
 
 Stable API: same as v0.1.0, now used by signal-tui.
