@@ -326,7 +326,9 @@ fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config:
                 return;
             };
             message.reply_to = quote.and_then(|id| app.discussions[idx].position_of(&id));
-            if app.settings.notifications && !message.from_me && !app.is_open(idx) {
+            // Known already (sent from here, updated): replaced, not notified.
+            let new = app.discussions[idx].position_of(&message.id).is_none();
+            if new && app.settings.notifications && !message.from_me && !app.is_open(idx) {
                 notify(
                     &config.name,
                     &app.discussions[idx],

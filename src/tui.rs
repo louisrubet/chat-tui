@@ -457,9 +457,15 @@ impl App {
     /// Appends a message to a discussion. If that discussion is open, the selection follows
     /// the new message when it is ours (and is then hidden) or when the previous last message
     /// was selected; otherwise a received message marks it unread.
+    /// Adds `message` to `discussion`; one it has already (same id: sent here and received
+    /// back, updated…) is replaced, not counted as new.
     pub fn push_message(&mut self, discussion: usize, message: Message) {
         let open = self.is_open(discussion);
         let target = &mut self.discussions[discussion];
+        if let Some(known) = target.position_of(&message.id) {
+            target.messages[known] = message;
+            return;
+        }
         let was_last = target.messages.len().saturating_sub(1);
         let from_me = message.from_me;
         // Their message arrived: they are done typing it.
@@ -2496,16 +2502,33 @@ mod tests {
     }
 
     #[test]
+    fn a_known_message_is_replaced_not_added() {
+        let mut app = app();
+        let received = |text: &str| Message {
+            from_me: false,
+            ..Message::mine("same", text.to_string(), None, false)
+        };
+        let before = app.discussions[2].messages.len();
+        app.push_message(2, received("first"));
+        let unread = app.discussions[2].unread;
+        app.push_message(2, received("updated"));
+        let messages = &app.discussions[2].messages;
+        assert_eq!(messages.len(), before + 1);
+        assert_eq!(messages.last().unwrap().text, "updated");
+        assert_eq!(app.discussions[2].unread, unread, "not counted twice");
+    }
+
+    #[test]
     fn received_messages_mark_other_discussions_unread() {
         let mut app = opened();
-        let received = || Message {
+        let received = |id: u32| Message {
             from_me: false,
-            ..Message::mine(1, "hi".to_string(), None, false)
+            ..Message::mine(id, "hi".to_string(), None, false)
         };
-        app.push_message(0, received());
-        app.push_message(2, received());
+        app.push_message(0, received(1));
+        app.push_message(2, received(1));
         app.push_message(3, Message::mine(2, "sent".to_string(), None, false));
-        app.push_message(2, received());
+        app.push_message(2, received(3));
         assert_eq!(app.discussions[0].unread, 0, "open discussion stays read");
         assert_eq!(app.discussions[2].unread, 2);
         assert_eq!(app.discussions[3].unread, 0, "own messages are not updates");
