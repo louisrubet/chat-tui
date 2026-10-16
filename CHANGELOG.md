@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.1
+
+- Unread counts above 20 in digits (`21`, `99+`): circled ㉑ and up took two columns and stuck out on the left.
+- History arriving after a chat was opened: its images are fetched too.
+
 ## v1.1.0
 
 - `Event::History`: earlier messages of a chat, merged with those shown (known ones replaced, send order kept), without notifying. Selection, quotes and the reply being written keep pointing to their message.
