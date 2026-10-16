@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.1
+
+- A message pushed or received again (same id: sent here and echoed back, updated) replaces the one shown: not added twice, not notified, not counted as new.
+
 ## v1.2.0
 
 - Esc gives up a message being sent, whatever blocks it: "Sending cancelled" in the status line, the interface free again.
