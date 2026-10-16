@@ -12,7 +12,7 @@ The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal
 
 ```toml
 [dependencies]
-chat-tui = { git = "https://github.com/louisrubet/chat-tui", tag = "v1.1.1" }
+chat-tui = { git = "https://github.com/louisrubet/chat-tui", tag = "v1.1.2" }
 ```
 
 Implement [`Backend`](src/backend.rs) for your service, load the chats, then run:

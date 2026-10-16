@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.2
+
+- No panic drawing the chat list or the parameters in a terminal of no rows.
+
 ## v1.1.1
 
 - Unread counts above 20 in digits (`21`, `99+`): circled ㉑ and up took two columns and stuck out on the left.
