@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.1
+
+- Back from a chat or the parameters, the chat list keeps its view: the chat left is no longer pushed to the last row.
+
 ## v1.3.0
 
 - The name of the application (`Config::name`) heads the chat list, in bold, above "Pinned" or "Chats".
