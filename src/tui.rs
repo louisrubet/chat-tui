@@ -276,6 +276,8 @@ struct Typing {
 }
 
 pub struct App {
+    /// Name of the application, shown in bold above the chat list; none if empty.
+    pub name: String,
     pub discussions: Vec<Discussion>,
     pub settings: Settings,
     typing: Vec<Typing>,
@@ -298,6 +300,7 @@ impl App {
     pub fn new(discussions: Vec<Discussion>) -> Self {
         let first = order(&discussions).first().copied().unwrap_or(0);
         App {
+            name: String::new(),
             discussions,
             settings: Settings::default(),
             typing: Vec::new(),
@@ -1060,6 +1063,7 @@ impl App {
                 out,
                 &self.discussions,
                 &typing,
+                Some(self.name.as_str()).filter(|name| !name.is_empty()),
                 None,
                 "\u{2191}/\u{2193} select chat   Enter open   P pin/unpin   p parameters   q quit",
                 *selected,
@@ -1110,6 +1114,7 @@ impl App {
                 out,
                 &self.discussions,
                 &typing,
+                None,
                 Some("Forward to\u{2026}"),
                 "\u{2191}/\u{2193} select chat   Enter forward   Esc cancel",
                 *selected,
@@ -1249,17 +1254,23 @@ fn step(discussions: &[Discussion], selected: usize, delta: isize) -> usize {
 
 /// A line of the chat list.
 enum Row<'a> {
+    /// The name of the application, above the sections.
+    Heading(&'a str),
     Title(&'a str),
     Blank,
     Chat(usize),
 }
 
-/// The list lines: one `title` section, or "Pinned" and "Chats" sections (only "Chats"
-/// when nothing is pinned).
-fn list_rows<'a>(discussions: &[Discussion], title: Option<&'a str>) -> Vec<Row<'a>> {
+/// The list lines: the `heading` if any, then one `title` section, or "Pinned" and "Chats"
+/// sections (only "Chats" when nothing is pinned).
+fn list_rows<'a>(
+    discussions: &[Discussion],
+    heading: Option<&'a str>,
+    title: Option<&'a str>,
+) -> Vec<Row<'a>> {
     let order = order(discussions);
     let pinned_count = discussions.iter().filter(|d| d.pinned.is_some()).count();
-    let mut rows = Vec::new();
+    let mut rows: Vec<_> = heading.map(Row::Heading).into_iter().collect();
     let section = |rows: &mut Vec<Row<'a>>, title: &'a str, chats: &[usize]| {
         if !rows.is_empty() {
             rows.push(Row::Blank);
@@ -1288,6 +1299,8 @@ fn draw_list(
     discussions: &[Discussion],
     // Discussions where someone is typing.
     typing: &[usize],
+    // Name of the application, above the sections.
+    heading: Option<&str>,
     // Single section title; `None` for the "Pinned" / "Chats" sections.
     title: Option<&str>,
     help: &str,
@@ -1299,7 +1312,7 @@ fn draw_list(
     let width = w as usize;
     let height = h as usize;
     let viewport = height.saturating_sub(FOOTER).max(1);
-    let rows = list_rows(discussions, title);
+    let rows = list_rows(discussions, heading, title);
 
     // Keep the selected chat in view, with its section title when it is the first one.
     let sel_row = rows
@@ -1321,6 +1334,16 @@ fn draw_list(
     queue!(out, Clear(ClearType::All), cursor::Hide)?;
     for y in 0..viewport {
         let text = match rows.get(*scroll + y) {
+            Some(Row::Heading(name)) => {
+                let text = ui::pad_left(name, width);
+                let bold = Styled {
+                    start: 0,
+                    end: name.len().min(text.len()),
+                    style: data::Style::Bold,
+                };
+                print_styled(out, y as u16, &text, &[bold], false)?;
+                continue;
+            }
             Some(Row::Title(title)) => ui::pad_left(title, width),
             Some(Row::Chat(idx)) => {
                 let idx = *idx;
@@ -2408,6 +2431,18 @@ mod tests {
         assert!(screen(&mut app).contains("\u{1f44d} 2  \u{2764}\u{fe0f}"));
         app.discussions[0].messages[last].set_reaction("c", true, None);
         assert!(!screen(&mut app).contains("\u{2764}\u{fe0f}"));
+    }
+
+    #[test]
+    fn the_application_name_heads_the_list() {
+        let mut app = app();
+        assert!(!screen(&mut app).contains("signal-tui"), "no name, no heading");
+        app.name = "signal-tui".to_string();
+        let text = screen(&mut app);
+        assert!(text.find("signal-tui").unwrap() < text.find("Pinned").unwrap());
+        app.handle_key(key(KeyCode::Char('P')));
+        let text = screen(&mut app);
+        assert!(text.find("signal-tui").unwrap() < text.find("Chats").unwrap());
     }
 
     #[test]

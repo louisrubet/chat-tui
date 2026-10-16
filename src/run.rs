@@ -72,6 +72,7 @@ pub async fn run(
         discussion.pinned = pins.rank(&discussion.id);
     }
     let mut app = App::new(discussions);
+    app.name = config.name.clone();
     app.settings = Settings::load(&config.settings);
     app.thumbnails = Thumbnails::detect();
     app.capabilities = backend.capabilities();
