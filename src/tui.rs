@@ -288,6 +288,8 @@ pub struct App {
     clipboard: Option<String>,
     /// Chats shown by a page of the chat list, as last drawn (PageUp / PageDown).
     list_page: usize,
+    /// Scroll of the chat list when it was left: back to it, the view is the same.
+    list_scroll: usize,
     /// Messages to jump by a page in a discussion, from the last draw (PageUp / PageDown).
     message_page: usize,
     /// Image thumbnails shown in the discussions (off unless the terminal supports them).
@@ -311,6 +313,7 @@ impl App {
             status: None,
             clipboard: None,
             list_page: 10,
+            list_scroll: 0,
             message_page: 5,
             thumbnails: Thumbnails::default(),
             capabilities: Capabilities::default(),
@@ -590,6 +593,9 @@ impl App {
 
     /// Opens discussion `idx`, on its first new message, below a "N new messages" line.
     pub fn open(&mut self, idx: usize) -> Action {
+        if let Screen::List { scroll, .. } = self.screen {
+            self.list_scroll = scroll;
+        }
         let discussion = &mut self.discussions[idx];
         let new_from = discussion
             .first_unread()
@@ -626,7 +632,7 @@ impl App {
         let discussions = &self.discussions;
 
         match &mut self.screen {
-            Screen::List { selected, .. } => match key.code {
+            Screen::List { selected, scroll } => match key.code {
                 KeyCode::Up => *selected = step(discussions, *selected, -1),
                 KeyCode::Down => *selected = step(discussions, *selected, 1),
                 KeyCode::PageUp => {
@@ -653,6 +659,7 @@ impl App {
                 }
                 KeyCode::Char('p') => {
                     let back_to = *selected;
+                    self.list_scroll = *scroll;
                     self.screen = Screen::Settings {
                         selected: 0,
                         back_to,
@@ -872,7 +879,7 @@ impl App {
                             let back_to = *discussion_idx;
                             self.screen = Screen::List {
                                 selected: back_to,
-                                scroll: 0,
+                                scroll: self.list_scroll,
                             };
                         }
                         KeyCode::Char('q') => return Some(Action::Quit),
@@ -1000,7 +1007,7 @@ impl App {
                     let selected = *back_to;
                     self.screen = Screen::List {
                         selected,
-                        scroll: 0,
+                        scroll: self.list_scroll,
                     };
                 }
                 KeyCode::Char('q') => return Some(Action::Quit),
@@ -2443,6 +2450,31 @@ mod tests {
         app.handle_key(key(KeyCode::Char('P')));
         let text = screen(&mut app);
         assert!(text.find("signal-tui").unwrap() < text.find("Chats").unwrap());
+    }
+
+    #[test]
+    fn the_chat_list_keeps_its_view_after_a_chat_or_the_parameters() {
+        let titles = (0..100)
+            .map(|i| Discussion::new(i.to_string(), format!("Chat {i:02}")))
+            .collect();
+        let mut app = App::new(titles);
+        // Scrolled down, then a few chats up: the selected one is not on the last row.
+        for _ in 0..60 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        screen(&mut app);
+        for _ in 0..20 {
+            app.handle_key(key(KeyCode::Up));
+        }
+        let before = screen(&mut app);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::Opened(40)));
+        screen(&mut app);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(screen(&mut app), before);
+        app.handle_key(key(KeyCode::Char('p')));
+        screen(&mut app);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(screen(&mut app), before);
     }
 
     #[test]
