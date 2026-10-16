@@ -3,6 +3,7 @@
 //! [`App`] holds the state and draws it; [`App::handle_key`] turns key presses into
 //! [`Action`]s, that [`crate::run`] carries out through the backend.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write, stdout};
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use crossterm::{
 };
 
 use crate::backend::Capabilities;
-use crate::data::{self, Discussion, Message, Styled};
+use crate::data::{self, Discussion, Message, MessageId, Styled};
 use crate::editor::Editor;
 use crate::fuzzy;
 use crate::graphics::Thumbnails;
@@ -483,6 +484,98 @@ impl App {
             *selected_msg = last;
             // Once ours is sent, back to reading the end of the discussion.
             *selecting &= !from_me;
+        }
+    }
+
+    /// Merges into `discussion` its `history`, each message with the id of the one it quotes:
+    /// messages not known yet are added, known ones replaced, all in send order. What points
+    /// to a message (selection, quotes, reply being written) keeps pointing to it. Not
+    /// counted as unread here (see [`crate::store::ReadMarks::unread_count`]).
+    pub fn merge_history(&mut self, discussion: usize, history: Vec<(Message, Option<MessageId>)>) {
+        let target = &mut self.discussions[discussion];
+        let old_len = target.messages.len();
+        let quote_of = |messages: &[Message], m: &Message| {
+            m.reply_to
+                .and_then(|i| messages.get(i))
+                .map(|q| q.id.clone())
+        };
+        // (index before, message, id of the quoted one)
+        let mut entries: Vec<(Option<usize>, Message, Option<MessageId>)> = target
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (Some(i), m.clone(), quote_of(&target.messages, m)))
+            .collect();
+        let mut known: HashMap<MessageId, usize> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.1.id.clone(), i))
+            .collect();
+        for (message, quote) in history {
+            match known.get(&message.id) {
+                Some(&i) => {
+                    entries[i].1 = message;
+                    entries[i].2 = quote;
+                }
+                None => {
+                    known.insert(message.id.clone(), entries.len());
+                    entries.push((None, message, quote));
+                }
+            }
+        }
+        entries.sort_by_key(|e| e.1.sent_ms);
+
+        let mut moved = vec![0; old_len];
+        for (new, entry) in entries.iter().enumerate() {
+            if let Some(old) = entry.0 {
+                moved[old] = new;
+            }
+        }
+        let index: HashMap<MessageId, usize> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.1.id.clone(), i))
+            .collect();
+        target.messages = entries
+            .into_iter()
+            .map(|(_, mut message, quote)| {
+                message.reply_to = quote.and_then(|id| index.get(&id).copied());
+                message
+            })
+            .collect();
+        let last = target.messages.len().saturating_sub(1);
+        let remap = |i: usize| moved.get(i).copied().unwrap_or(last);
+
+        match &mut self.screen {
+            Screen::Discussion {
+                discussion_idx,
+                selected_msg,
+                selecting,
+                composing,
+                new_from,
+                ..
+            } if *discussion_idx == discussion => {
+                // Reading the end: still the end.
+                *selected_msg = if !*selecting && *selected_msg + 1 >= old_len {
+                    last
+                } else {
+                    remap(*selected_msg)
+                };
+                if let Some((first, _)) = new_from {
+                    *first = remap(*first);
+                }
+                if let Some(compose) = composing
+                    && let Some(reply_to) = &mut compose.reply_to
+                {
+                    *reply_to = remap(*reply_to);
+                }
+            }
+            Screen::Forward {
+                discussion_idx,
+                msg_idx,
+                ..
+            } if *discussion_idx == discussion => *msg_idx = remap(*msg_idx),
+            _ => {}
         }
     }
 
@@ -2323,6 +2416,75 @@ mod tests {
         assert_eq!(unread_badge(21), "\u{3251}");
         assert_eq!(unread_badge(50), "\u{32bf}");
         assert_eq!(unread_badge(51), "50+");
+    }
+
+    /// A message `id` sent at `ms`, from someone else.
+    fn at(id: &str, ms: u64) -> Message {
+        Message {
+            sent_ms: ms,
+            from_me: false,
+            ..Message::mine(id, id.to_string(), None, false)
+        }
+    }
+
+    #[test]
+    fn history_merges_in_send_order_and_keeps_pointers() {
+        let mut app = app();
+        let discussion = &mut app.discussions[0];
+        discussion.messages = vec![at("c", 30), at("d", 40)];
+        discussion.messages[1].reply_to = Some(0);
+        app.open(0);
+        app.merge_history(
+            0,
+            vec![
+                (at("b", 20), Some("a".to_string())),
+                (at("a", 10), None),
+                (
+                    Message {
+                        text: "c edited".to_string(),
+                        ..at("c", 30)
+                    },
+                    None,
+                ),
+            ],
+        );
+        let messages = &app.discussions[0].messages;
+        let ids: Vec<_> = messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c", "d"]);
+        assert_eq!(messages[1].reply_to, Some(0), "quote resolved by id");
+        assert_eq!(messages[3].reply_to, Some(2), "existing quote moved along");
+        assert_eq!(messages[2].text, "c edited", "known message replaced");
+        assert!(
+            matches!(
+                app.screen,
+                Screen::Discussion {
+                    selected_msg: 3,
+                    ..
+                }
+            ),
+            "still reading the end"
+        );
+    }
+
+    #[test]
+    fn history_keeps_the_selected_message() {
+        let mut app = app();
+        app.discussions[0].messages = vec![at("c", 30), at("d", 40)];
+        app.open(0);
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Up));
+        app.merge_history(0, vec![(at("a", 10), None), (at("b", 20), None)]);
+        assert!(
+            matches!(
+                app.screen,
+                Screen::Discussion {
+                    selected_msg: 2,
+                    selecting: true,
+                    ..
+                }
+            ),
+            "\"c\" still selected"
+        );
     }
 
     #[test]

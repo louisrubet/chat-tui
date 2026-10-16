@@ -45,6 +45,12 @@ pub enum Event {
         message: Message,
         quote: Option<MessageId>,
     },
+    /// Earlier messages of a chat, each with the id of the one it quotes, in any order:
+    /// merged with those shown (the known ones replaced), without notifying.
+    History {
+        chat: ChatId,
+        messages: Vec<(Message, Option<MessageId>)>,
+    },
     /// A reaction set, or removed with `None`.
     Reaction {
         chat: ChatId,

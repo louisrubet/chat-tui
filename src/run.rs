@@ -314,6 +314,20 @@ fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config:
                 app.set_status(format!("Cannot save the read state: {e}"));
             }
         }
+        Event::History { chat, messages } => {
+            let Some(idx) = position(app, &chat) else {
+                return;
+            };
+            app.merge_history(idx, messages);
+            if app.is_open(idx) {
+                if let Err(e) = read_marks.mark_read(&app.discussions[idx]) {
+                    app.set_status(format!("Cannot save the read state: {e}"));
+                }
+            } else {
+                let discussion = &mut app.discussions[idx];
+                discussion.unread = read_marks.unread_count(discussion);
+            }
+        }
         Event::Reaction {
             chat,
             target,
