@@ -5,7 +5,7 @@ use std::io::{self, Write, stdout};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crossterm::event::{Event as TermEvent, EventStream};
+use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEventKind};
 use crossterm::terminal;
 use futures::{Stream, StreamExt};
 
@@ -198,13 +198,33 @@ pub async fn run(
                         (to, draft)
                     }
                 };
-                app.set_status("Sending\u{2026}");
+                app.set_status("Sending\u{2026} (Esc to cancel)");
                 app.draw(&mut out, w, h)?;
                 out.flush()?;
 
                 let forwarded = draft.forwarded;
                 let reply_to = draft.reply_to.as_ref().and_then(|m| app.discussions[discussion].position_of(&m.id));
-                match backend.send(&app.discussions[discussion].id, draft).await {
+                let mut send = std::pin::pin!(backend.send(&app.discussions[discussion].id, draft));
+                // Waiting for it, whatever blocks it: Esc gives up (other keys wait).
+                let sent = loop {
+                    tokio::select! {
+                        sent = &mut send => break Some(sent),
+                        key = keys.next() => match key {
+                            Some(Ok(TermEvent::Key(key)))
+                                if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc =>
+                            {
+                                break None;
+                            }
+                            None => break None,
+                            _ => {}
+                        },
+                    }
+                };
+                let Some(sent) = sent else {
+                    app.set_status("Sending cancelled: it may still go out if it had left");
+                    continue;
+                };
+                match sent {
                     Ok(mut message) => {
                         message.forwarded = forwarded;
                         message.reply_to = reply_to;

@@ -2,6 +2,8 @@
 //!
 //!   cargo run --example mock_tui            # `-- --open` opens the first chat
 //!
+//! A message starting with `/hang` is never sent: to try cancelling with Esc.
+//!
 //! Its state (pins, read marks, settings) goes to a temporary directory.
 
 use std::future::Future;
@@ -30,6 +32,9 @@ impl Backend for Mock {
         draft: Draft,
     ) -> impl Future<Output = Result<Message>> + 'static {
         async move {
+            if draft.text.starts_with("/hang") {
+                std::future::pending::<()>().await;
+            }
             let id = chrono::Utc::now().timestamp_millis();
             let mut message = Message::mine(id, draft.text, None, draft.forwarded);
             message.styles = draft.styles;
