@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.0
+
+- The name of the application (`Config::name`) heads the chat list, in bold, above "Pinned" or "Chats".
+
 ## v1.2.1
 
 - A message pushed or received again (same id: sent here and echoed back, updated) replaces the one shown: not added twice, not notified, not counted as new.
