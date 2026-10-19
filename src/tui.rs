@@ -423,6 +423,25 @@ impl App {
         self.discussions.len() - 1
     }
 
+    /// The title, kind and visibility of `discussion` changed to those of `update`. Hidden,
+    /// it is no longer selected in the chat list (but stays shown while open).
+    pub fn update_discussion(&mut self, discussion: usize, update: Discussion) {
+        let target = &mut self.discussions[discussion];
+        target.title = update.title;
+        target.is_group = update.is_group;
+        target.hidden = update.hidden;
+        if update.hidden {
+            let first = order(&self.discussions).first().copied();
+            if let Screen::List { selected, .. } | Screen::Forward { selected, .. } =
+                &mut self.screen
+                && *selected == discussion
+                && let Some(first) = first
+            {
+                *selected = first;
+            }
+        }
+    }
+
     /// `author` (named `name`) started or stopped typing in `discussion`.
     pub fn set_typing(
         &mut self,
@@ -1232,8 +1251,9 @@ const FOOTER: usize = 1;
 
 /// Discussion indices in display order: pinned first (in pin order), then the others.
 fn order(discussions: &[Discussion]) -> Vec<usize> {
-    let (mut pinned, others): (Vec<usize>, Vec<usize>) =
-        (0..discussions.len()).partition(|&i| discussions[i].pinned.is_some());
+    let (mut pinned, others): (Vec<usize>, Vec<usize>) = (0..discussions.len())
+        .filter(|&i| !discussions[i].hidden)
+        .partition(|&i| discussions[i].pinned.is_some());
     pinned.sort_by_key(|&i| discussions[i].pinned);
     pinned.into_iter().chain(others).collect()
 }
@@ -1276,7 +1296,10 @@ fn list_rows<'a>(
     title: Option<&'a str>,
 ) -> Vec<Row<'a>> {
     let order = order(discussions);
-    let pinned_count = discussions.iter().filter(|d| d.pinned.is_some()).count();
+    let pinned_count = order
+        .iter()
+        .filter(|&&i| discussions[i].pinned.is_some())
+        .count();
     let mut rows: Vec<_> = heading.map(Row::Heading).into_iter().collect();
     let section = |rows: &mut Vec<Row<'a>>, title: &'a str, chats: &[usize]| {
         if !rows.is_empty() {
@@ -2679,6 +2702,44 @@ mod tests {
                 styles: vec![],
                 reply_to: Some(last)
             })
+        );
+    }
+
+    #[test]
+    fn a_hidden_chat_is_not_listed_nor_selected() {
+        let mut app = app();
+        assert_eq!(app.handle_key(key(KeyCode::Down)), None);
+        let selected = |app: &App| match app.screen {
+            Screen::List { selected, .. } => selected,
+            _ => unreachable!(),
+        };
+        let family = selected(&app);
+        assert_eq!(app.discussions[family].id, "family");
+        let mut update = Discussion::new("family", "Family");
+        update.hidden = true;
+        app.update_discussion(family, update);
+        assert!(!screen(&mut app).contains("Family"));
+        assert_eq!(selected(&app), 0, "back to the first listed");
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Down));
+            assert_ne!(selected(&app), family);
+        }
+        app.update_discussion(family, Discussion::new("family", "Family renamed"));
+        assert!(screen(&mut app).contains("Family renamed"));
+    }
+
+    #[test]
+    fn a_hidden_chat_stays_open() {
+        let mut app = opened();
+        let mut update = Discussion::new("alice", "Alice Martin");
+        update.hidden = true;
+        app.update_discussion(0, update);
+        assert!(app.is_open(0));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!screen(&mut app).contains("Alice Martin"));
+        assert!(
+            !screen(&mut app).contains("Pinned"),
+            "nothing pinned is listed"
         );
     }
 }

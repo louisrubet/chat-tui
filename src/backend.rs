@@ -36,7 +36,8 @@ pub type Downloaded = (Vec<Attachment>, Vec<Option<Attachment>>);
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Event {
-    /// A chat not known yet; its messages follow.
+    /// A chat not known yet; its messages follow. For a known one: its title, kind and
+    /// visibility changed (its messages and pin are kept).
     Chat(Discussion),
     /// A new message, with the id of the one it quotes. Its images may be downloaded
     /// already; other attachments wait for the user to open them.
@@ -72,6 +73,8 @@ pub enum Event {
         name: String,
         started: bool,
     },
+    /// A chat read on another device: none of its messages is new any more.
+    Read { chat: ChatId },
     /// Shown in the footer, e.g. a lost connection.
     Status(String),
 }
@@ -109,4 +112,8 @@ pub trait Backend {
         chat: &ChatId,
         message: &Message,
     ) -> impl Future<Output = Result<Downloaded>> + 'static;
+
+    /// `chat` was read here up to its `last` message: for the other devices to know.
+    /// Nothing by default.
+    fn read(&self, _chat: &ChatId, _last: &Message) {}
 }

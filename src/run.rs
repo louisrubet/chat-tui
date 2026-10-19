@@ -267,7 +267,7 @@ pub async fn run(
                     }
                     _ => None,
                 };
-                handle_event(&mut app, event, &mut read_marks, &config);
+                handle_event(&mut app, event, &backend, &mut read_marks, &config);
                 if let Some((chat, only)) = images_of
                     && let Some(idx) = app.discussions.iter().position(|d| d.id == chat)
                 {
@@ -290,9 +290,7 @@ fn opened(
     history_fetched: &mut HashSet<ChatId>,
     fetched: &Fetched,
 ) {
-    if let Err(e) = read_marks.mark_read(&app.discussions[idx]) {
-        app.set_status(format!("Cannot save the read state: {e}"));
-    }
+    read(app, idx, backend, read_marks);
     if app.thumbnails.enabled() && history_fetched.insert(app.discussions[idx].id.clone()) {
         fetch_images(backend, &app.discussions[idx], None, fetched);
     }
@@ -316,14 +314,21 @@ fn draft(
 }
 
 /// Shows what the backend reports.
-fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config: &Config) {
+fn handle_event(
+    app: &mut App,
+    event: Event,
+    backend: &impl Backend,
+    read_marks: &mut ReadMarks,
+    config: &Config,
+) {
     let position = |app: &App, chat: &str| app.discussions.iter().position(|d| d.id == chat);
     match event {
-        Event::Chat(discussion) => {
-            if position(app, &discussion.id).is_none() {
+        Event::Chat(discussion) => match position(app, &discussion.id) {
+            Some(idx) => app.update_discussion(idx, discussion),
+            None => {
                 app.push_discussion(discussion);
             }
-        }
+        },
         Event::Message {
             chat,
             mut message,
@@ -343,12 +348,14 @@ fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config:
                     &message.summary(),
                 );
             }
+            // Written to: listed again (as the phones do).
+            if new && !message.from_me {
+                app.discussions[idx].hidden = false;
+            }
             app.push_message(idx, message);
             // Arrived in the discussion being read: not new on the next start.
-            if app.is_open(idx)
-                && let Err(e) = read_marks.mark_read(&app.discussions[idx])
-            {
-                app.set_status(format!("Cannot save the read state: {e}"));
+            if app.is_open(idx) {
+                read(app, idx, backend, read_marks);
             }
         }
         Event::History { chat, messages } => {
@@ -357,9 +364,7 @@ fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config:
             };
             app.merge_history(idx, messages);
             if app.is_open(idx) {
-                if let Err(e) = read_marks.mark_read(&app.discussions[idx]) {
-                    app.set_status(format!("Cannot save the read state: {e}"));
-                }
+                read(app, idx, backend, read_marks);
             } else {
                 let discussion = &mut app.discussions[idx];
                 discussion.unread = read_marks.unread_count(discussion);
@@ -402,7 +407,26 @@ fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config:
                 app.set_typing(idx, &author, &name, started, Instant::now());
             }
         }
+        Event::Read { chat } => {
+            if let Some(idx) = position(app, &chat) {
+                app.discussions[idx].unread = 0;
+                if let Err(e) = read_marks.mark_read(&app.discussions[idx]) {
+                    app.set_status(format!("Cannot save the read state: {e}"));
+                }
+            }
+        }
         Event::Status(status) => app.set_status(status),
+    }
+}
+
+/// Discussion `idx` was read up to its last message: here, then on the other devices.
+fn read(app: &mut App, idx: usize, backend: &impl Backend, read_marks: &mut ReadMarks) {
+    let discussion = &app.discussions[idx];
+    if let Some(last) = discussion.messages.last() {
+        backend.read(&discussion.id, last);
+    }
+    if let Err(e) = read_marks.mark_read(discussion) {
+        app.set_status(format!("Cannot save the read state: {e}"));
     }
 }
 

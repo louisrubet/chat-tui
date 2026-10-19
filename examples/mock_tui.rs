@@ -212,6 +212,7 @@ mod demo {
             messages,
             unread: 1,
             pinned: Some(0),
+            hidden: false,
         }
     }
 
