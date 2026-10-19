@@ -70,6 +70,10 @@ impl Backend for Mock {
         async { Ok(()) }
     }
 
+    fn restore(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
+        async { Ok(()) }
+    }
+
     fn download(
         &self,
         _chat: &ChatId,
@@ -222,6 +226,7 @@ mod demo {
             unread: 1,
             pinned: Some(0),
             hidden: false,
+            folder: None,
         }
     }
 

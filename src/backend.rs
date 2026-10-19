@@ -14,8 +14,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub struct Capabilities {
     /// How long after sending our messages can be deleted for everyone; `None`: never.
     pub delete_max_age: Option<Duration>,
-    /// Whether chats can be archived and deleted ([`Backend::archive`],
-    /// [`Backend::delete_chat`]).
+    /// Whether chats can be archived, deleted and restored ([`Backend::archive`],
+    /// [`Backend::delete_chat`], [`Backend::restore`]).
     pub chat_actions: bool,
 }
 
@@ -39,8 +39,8 @@ pub type Downloaded = (Vec<Attachment>, Vec<Option<Attachment>>);
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Event {
-    /// A chat not known yet; its messages follow. For a known one: its title, kind and
-    /// visibility changed (its messages and pin are kept).
+    /// A chat not known yet; its messages follow. For a known one: its title, kind, folder
+    /// or visibility changed (its messages and pin are kept).
     Chat(Discussion),
     /// A new message, with the id of the one it quotes. Its images may be downloaded
     /// already; other attachments wait for the user to open them.
@@ -121,9 +121,15 @@ pub trait Backend {
         async { Err("archiving is not supported".into()) }
     }
 
-    /// Deletes `chat` and its messages, for good.
+    /// Deletes `chat` and its messages: to the trash, or for good from there. Its new place
+    /// (trash, or gone) comes as an [`Event::Chat`].
     fn delete_chat(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
         async { Err("deleting chats is not supported".into()) }
+    }
+
+    /// Moves `chat` back to the inbox, from a folder.
+    fn restore(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
+        async { Err("restoring chats is not supported".into()) }
     }
 
     /// `chat` was read here up to its `last` message: for the other devices to know.

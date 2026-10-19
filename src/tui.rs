@@ -22,7 +22,7 @@ use crossterm::{
 };
 
 use crate::backend::Capabilities;
-use crate::data::{self, Discussion, Message, MessageId, Styled};
+use crate::data::{self, Discussion, Folder, Message, MessageId, Styled};
 use crate::editor::Editor;
 use crate::fuzzy;
 use crate::graphics::Thumbnails;
@@ -61,8 +61,10 @@ pub enum Action {
     },
     /// Archive `discussion`.
     Archive(usize),
-    /// Delete `discussion` for good (confirmed).
+    /// Delete `discussion` (confirmed).
     DeleteChat(usize),
+    /// Move `discussion` back to the inbox, from its folder.
+    Restore(usize),
     /// Delete our message `msg` of `discussion` for everyone (confirmed).
     Delete {
         discussion: usize,
@@ -302,11 +304,16 @@ pub struct App {
     pub capabilities: Capabilities,
     /// The chat whose deletion is asked to confirm, in the chat list.
     deleting_chat: Option<usize>,
+    /// The folder shown by the chat list; `None` for the inbox.
+    folder: Option<Folder>,
 }
 
 impl App {
     pub fn new(discussions: Vec<Discussion>) -> Self {
-        let first = order(&discussions).first().copied().unwrap_or(0);
+        let first = entries(&discussions, None, true)
+            .first()
+            .copied()
+            .unwrap_or(0);
         App {
             name: String::new(),
             discussions,
@@ -324,6 +331,7 @@ impl App {
             thumbnails: Thumbnails::default(),
             capabilities: Capabilities::default(),
             deleting_chat: None,
+            folder: None,
         }
     }
 
@@ -430,25 +438,50 @@ impl App {
         self.discussions.len() - 1
     }
 
-    /// The title, kind and visibility of `discussion` changed to those of `update`. Hidden,
-    /// it is no longer selected in the chat list (but stays shown while open).
+    /// The title, kind, folder and visibility of `discussion` changed to those of `update`.
+    /// Out of the list shown, it is no longer selected there (but stays shown while open).
     pub fn update_discussion(&mut self, discussion: usize, update: Discussion) {
         let target = &mut self.discussions[discussion];
         target.title = update.title;
         target.is_group = update.is_group;
         target.hidden = update.hidden;
-        if update.hidden {
-            self.hide_discussion(discussion);
-        }
+        target.folder = update.folder;
+        self.keep_selection();
     }
 
-    /// Hides `discussion`: no longer selected in the chat list, but still shown while open.
+    /// Hides `discussion` (gone): no longer selected in the chat list, but still shown while
+    /// open.
     pub fn hide_discussion(&mut self, discussion: usize) {
         self.discussions[discussion].hidden = true;
-        let first = order(&self.discussions).first().copied();
-        if let Screen::List { selected, .. } | Screen::Forward { selected, .. } = &mut self.screen
-            && *selected == discussion
-            && let Some(first) = first
+        self.keep_selection();
+    }
+
+    /// Moves `discussion` to `folder` (`None`: the inbox).
+    pub fn file_discussion(&mut self, discussion: usize, folder: Option<Folder>) {
+        self.discussions[discussion].folder = folder;
+        self.keep_selection();
+    }
+
+    /// A selection of the chat list gone from it (chat moved, folder emptied) goes to its
+    /// first entry; an empty folder shown goes back to the inbox.
+    fn keep_selection(&mut self) {
+        if let Some(folder) = self.folder
+            && order(&self.discussions, Some(folder)).is_empty()
+        {
+            self.folder = None;
+            if let Screen::List { selected, .. } = &mut self.screen {
+                *selected = folder_entry(folder);
+            }
+        }
+        let (selected, entries) = match &mut self.screen {
+            Screen::List { selected, .. } => {
+                (selected, entries(&self.discussions, self.folder, true))
+            }
+            Screen::Forward { selected, .. } => (selected, entries(&self.discussions, None, false)),
+            _ => return,
+        };
+        if !entries.contains(selected)
+            && let Some(&first) = entries.first()
         {
             *selected = first;
         }
@@ -661,24 +694,33 @@ impl App {
             self.status = Some("Not deleted".to_string());
             return None;
         }
-        if let Screen::List { selected, .. } = self.screen
+        if let Screen::List { selected, scroll } = &mut self.screen
             && key.code == KeyCode::Enter
-            && selected < self.discussions.len()
         {
-            return Some(self.open(selected));
+            if *selected < self.discussions.len() {
+                let selected = *selected;
+                return Some(self.open(selected));
+            }
+            if let Some(folder) = entry_folder(*selected) {
+                self.folder = Some(folder);
+                *selected = order(&self.discussions, self.folder)
+                    .first()
+                    .copied()
+                    .unwrap_or(0);
+                *scroll = 0;
+            }
+            return None;
         }
         let discussions = &self.discussions;
+        let list = entries(discussions, self.folder, true);
+        let forward_list = entries(discussions, None, false);
 
         match &mut self.screen {
             Screen::List { selected, scroll } => match key.code {
-                KeyCode::Up => *selected = step(discussions, *selected, -1),
-                KeyCode::Down => *selected = step(discussions, *selected, 1),
-                KeyCode::PageUp => {
-                    *selected = step(discussions, *selected, -(self.list_page as isize))
-                }
-                KeyCode::PageDown => {
-                    *selected = step(discussions, *selected, self.list_page as isize)
-                }
+                KeyCode::Up => *selected = step(&list, *selected, -1),
+                KeyCode::Down => *selected = step(&list, *selected, 1),
+                KeyCode::PageUp => *selected = step(&list, *selected, -(self.list_page as isize)),
+                KeyCode::PageDown => *selected = step(&list, *selected, self.list_page as isize),
                 KeyCode::Char('P') if *selected < discussions.len() => {
                     let idx = *selected;
                     // Pinning again puts the chat at the end of the pinned list.
@@ -696,9 +738,18 @@ impl App {
                     return Some(Action::PinToggled(idx));
                 }
                 KeyCode::Char('a')
-                    if self.capabilities.chat_actions && *selected < discussions.len() =>
+                    if self.capabilities.chat_actions
+                        && self.folder.is_none()
+                        && *selected < discussions.len() =>
                 {
                     return Some(Action::Archive(*selected));
+                }
+                KeyCode::Char('r')
+                    if self.capabilities.chat_actions
+                        && self.folder.is_some()
+                        && *selected < discussions.len() =>
+                {
+                    return Some(Action::Restore(*selected));
                 }
                 KeyCode::Delete
                     if self.capabilities.chat_actions && *selected < discussions.len() =>
@@ -712,6 +763,10 @@ impl App {
                         selected: 0,
                         back_to,
                     };
+                }
+                KeyCode::Esc if self.folder.is_some() => {
+                    *selected = self.folder.take().map_or(0, folder_entry);
+                    *scroll = 0;
                 }
                 KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit),
                 _ => {}
@@ -1001,13 +1056,13 @@ impl App {
                 selected,
                 ..
             } => match key.code {
-                KeyCode::Up => *selected = step(discussions, *selected, -1),
-                KeyCode::Down => *selected = step(discussions, *selected, 1),
+                KeyCode::Up => *selected = step(&forward_list, *selected, -1),
+                KeyCode::Down => *selected = step(&forward_list, *selected, 1),
                 KeyCode::PageUp => {
-                    *selected = step(discussions, *selected, -(self.list_page as isize))
+                    *selected = step(&forward_list, *selected, -(self.list_page as isize))
                 }
                 KeyCode::PageDown => {
-                    *selected = step(discussions, *selected, self.list_page as isize)
+                    *selected = step(&forward_list, *selected, self.list_page as isize)
                 }
                 KeyCode::Enter => {
                     let action = Action::Forward {
@@ -1113,16 +1168,28 @@ impl App {
         }
         let typing: Vec<usize> = self.typing.iter().map(|t| t.discussion).collect();
         self.list_page = (h as usize).saturating_sub(FOOTER).max(1);
-        let list_footer = match (self.deleting_chat, &self.status) {
-            (Some(idx), _) => format!(
-                "Delete \u{201c}{}\u{201d} and its messages for good?   y yes   any other key: no",
-                self.discussions[idx].title
+        let actions = self.capabilities.chat_actions;
+        let list_footer = match (self.deleting_chat, &self.status, self.folder) {
+            (Some(idx), ..) => format!(
+                "Delete \u{201c}{}\u{201d}{}?   y yes   any other key: no",
+                self.discussions[idx].title,
+                if self.folder == Some(Folder::Trash) {
+                    " for good"
+                } else {
+                    ""
+                }
             ),
-            (None, Some(status)) => status.clone(),
-            (None, None) if self.capabilities.chat_actions => "\u{2191}/\u{2193} select chat   \
-                 Enter open   P pin/unpin   a archive   Del delete   p parameters   q quit"
+            (None, Some(status), _) => status.clone(),
+            (None, None, Some(_)) if actions => "\u{2191}/\u{2193} select chat   Enter open   \
+                 r back to the inbox   Del delete   Esc back   q quit"
                 .to_string(),
-            (None, None) => {
+            (None, None, Some(_)) => {
+                "\u{2191}/\u{2193} select chat   Enter open   Esc back   q quit".to_string()
+            }
+            (None, None, None) if actions => "\u{2191}/\u{2193} select chat   Enter open   \
+                 P pin/unpin   a archive   Del delete   p parameters   q quit"
+                .to_string(),
+            (None, None, None) => {
                 "\u{2191}/\u{2193} select chat   Enter open   P pin/unpin   p parameters   q quit"
                     .to_string()
             }
@@ -1134,6 +1201,8 @@ impl App {
                 &typing,
                 Some(self.name.as_str()).filter(|name| !name.is_empty()),
                 None,
+                self.folder,
+                true,
                 &list_footer,
                 *selected,
                 scroll,
@@ -1185,6 +1254,8 @@ impl App {
                 &typing,
                 None,
                 Some("Forward to\u{2026}"),
+                None,
+                false,
                 "\u{2191}/\u{2193} select chat   Enter forward   Esc cancel",
                 *selected,
                 scroll,
@@ -1292,13 +1363,55 @@ fn print_styled(
 const HEADER: usize = 2;
 const FOOTER: usize = 1;
 
-/// Discussion indices in display order: pinned first (in pin order), then the others.
-fn order(discussions: &[Discussion]) -> Vec<usize> {
+/// Indices of the discussions in `folder` (`None`: the inbox) in display order: pinned
+/// first (in pin order), then the others.
+fn order(discussions: &[Discussion], folder: Option<Folder>) -> Vec<usize> {
     let (mut pinned, others): (Vec<usize>, Vec<usize>) = (0..discussions.len())
-        .filter(|&i| !discussions[i].hidden)
+        .filter(|&i| !discussions[i].hidden && discussions[i].folder == folder)
         .partition(|&i| discussions[i].pinned.is_some());
     pinned.sort_by_key(|&i| discussions[i].pinned);
     pinned.into_iter().chain(others).collect()
+}
+
+/// The folders holding chats, with their number of chats.
+fn folders(discussions: &[Discussion]) -> Vec<(Folder, usize)> {
+    Folder::ALL
+        .into_iter()
+        .map(|f| {
+            (
+                f,
+                discussions
+                    .iter()
+                    .filter(|d| !d.hidden && d.folder == Some(f))
+                    .count(),
+            )
+        })
+        .filter(|&(_, n)| n > 0)
+        .collect()
+}
+
+/// The entry of the chat list leading to `folder`: out of the discussion indices.
+fn folder_entry(folder: Folder) -> usize {
+    usize::MAX - folder as usize
+}
+
+/// The folder an entry of the chat list leads to, if it is one.
+fn entry_folder(entry: usize) -> Option<Folder> {
+    Folder::ALL.into_iter().find(|&f| folder_entry(f) == entry)
+}
+
+/// The entries of the chat list showing `folder` (`None`: the inbox, followed by the
+/// folders if `with_folders`): discussion indices, and folder entries.
+fn entries(discussions: &[Discussion], folder: Option<Folder>, with_folders: bool) -> Vec<usize> {
+    let mut entries = order(discussions, folder);
+    if folder.is_none() && with_folders {
+        entries.extend(
+            folders(discussions)
+                .into_iter()
+                .map(|(f, _)| folder_entry(f)),
+        );
+    }
+    entries
 }
 
 /// `n` new messages: a circled number from ① to ⑳, digits beyond ("21", "99+"), nothing
@@ -1313,13 +1426,12 @@ fn unread_badge(n: usize) -> String {
     }
 }
 
-/// The discussion `delta` places away from `selected` in display order (clamped).
-fn step(discussions: &[Discussion], selected: usize, delta: isize) -> usize {
-    let order = order(discussions);
-    let Some(pos) = order.iter().position(|&i| i == selected) else {
-        return order.first().copied().unwrap_or(0);
+/// The entry `delta` places away from `selected` among `entries` (clamped).
+fn step(entries: &[usize], selected: usize, delta: isize) -> usize {
+    let Some(pos) = entries.iter().position(|&i| i == selected) else {
+        return entries.first().copied().unwrap_or(0);
     };
-    order[pos.saturating_add_signed(delta).min(order.len() - 1)]
+    entries[pos.saturating_add_signed(delta).min(entries.len() - 1)]
 }
 
 /// A line of the chat list.
@@ -1329,16 +1441,21 @@ enum Row<'a> {
     Title(&'a str),
     Blank,
     Chat(usize),
+    /// A folder and its number of chats.
+    Folder(Folder, usize),
 }
 
-/// The list lines: the `heading` if any, then one `title` section, or "Pinned" and "Chats"
-/// sections (only "Chats" when nothing is pinned).
+/// The list lines: the `heading` if any, then the chats of `folder` under its name, or
+/// those of the inbox in one `title` section, or "Pinned" and "Chats" sections (only
+/// "Chats" when nothing is pinned), followed by the folders if `with_folders`.
 fn list_rows<'a>(
     discussions: &[Discussion],
     heading: Option<&'a str>,
     title: Option<&'a str>,
+    folder: Option<Folder>,
+    with_folders: bool,
 ) -> Vec<Row<'a>> {
-    let order = order(discussions);
+    let order = order(discussions, folder);
     let pinned_count = order
         .iter()
         .filter(|&&i| discussions[i].pinned.is_some())
@@ -1352,9 +1469,10 @@ fn list_rows<'a>(
         rows.push(Row::Blank);
         rows.extend(chats.iter().map(|&i| Row::Chat(i)));
     };
-    match title {
-        Some(title) => section(&mut rows, title, &order),
-        None => {
+    match (folder, title) {
+        (Some(folder), _) => section(&mut rows, folder.name(), &order),
+        (None, Some(title)) => section(&mut rows, title, &order),
+        (None, None) => {
             if pinned_count > 0 {
                 section(&mut rows, "Pinned", &order[..pinned_count]);
             }
@@ -1362,6 +1480,11 @@ fn list_rows<'a>(
                 section(&mut rows, "Chats", &order[pinned_count..]);
             }
         }
+    }
+    let folders = folders(discussions);
+    if folder.is_none() && with_folders && !folders.is_empty() {
+        rows.push(Row::Blank);
+        rows.extend(folders.into_iter().map(|(f, n)| Row::Folder(f, n)));
     }
     rows
 }
@@ -1376,6 +1499,9 @@ fn draw_list(
     heading: Option<&str>,
     // Single section title; `None` for the "Pinned" / "Chats" sections.
     title: Option<&str>,
+    // The folder shown, `None` for the inbox (followed by the folders if `with_folders`).
+    folder: Option<Folder>,
+    with_folders: bool,
     help: &str,
     selected: usize,
     scroll: &mut usize,
@@ -1385,15 +1511,19 @@ fn draw_list(
     let width = w as usize;
     let height = h as usize;
     let viewport = height.saturating_sub(FOOTER).max(1);
-    let rows = list_rows(discussions, heading, title);
+    let rows = list_rows(discussions, heading, title, folder, with_folders);
 
     // Keep the selected chat in view, with its section title when it is the first one.
     let sel_row = rows
         .iter()
-        .position(|r| matches!(r, Row::Chat(i) if *i == selected))
+        .position(|r| match r {
+            Row::Chat(i) => *i == selected,
+            Row::Folder(f, _) => folder_entry(*f) == selected,
+            _ => false,
+        })
         .unwrap_or(0);
     let mut top = sel_row;
-    while top > 0 && !matches!(rows[top - 1], Row::Chat(_)) {
+    while top > 0 && !matches!(rows[top - 1], Row::Chat(_) | Row::Folder(..)) {
         top -= 1;
     }
     if top < *scroll {
@@ -1433,6 +1563,14 @@ fn draw_list(
                     ui::pad_left(&title, width.saturating_sub(4))
                 );
                 print_row(out, y as u16, &text, idx == selected)?;
+                continue;
+            }
+            Some(Row::Folder(f, n)) => {
+                let text = format!(
+                    "    {}",
+                    ui::pad_left(&format!("{} ({n})", f.name()), width.saturating_sub(4))
+                );
+                print_row(out, y as u16, &text, folder_entry(*f) == selected)?;
                 continue;
             }
             Some(Row::Blank) | None => " ".repeat(width),
@@ -2805,7 +2943,7 @@ mod tests {
             Some(Action::Archive(0))
         );
         app.handle_key(key(KeyCode::Delete));
-        assert!(screen(&mut app).contains("Delete \u{201c}Alice Martin\u{201d} and its messages"));
+        assert!(screen(&mut app).contains("Delete \u{201c}Alice Martin\u{201d}?"));
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), None);
         assert!(screen(&mut app).contains("Not deleted"));
         app.handle_key(key(KeyCode::Delete));
@@ -2816,5 +2954,78 @@ mod tests {
 
         app.hide_discussion(0);
         assert!(!screen(&mut app).contains("Alice Martin"));
+    }
+
+    #[test]
+    fn folders_follow_the_chat_list_and_open() {
+        let mut app = app();
+        app.capabilities.chat_actions = true;
+        assert!(
+            !screen(&mut app).contains("Archive ("),
+            "no folder shown when empty"
+        );
+        app.file_discussion(1, Some(Folder::Archive));
+        app.file_discussion(2, Some(Folder::Archive));
+        app.file_discussion(3, Some(Folder::Trash));
+        let text = screen(&mut app);
+        assert!(text.contains("Archive (2)") && text.contains("Trash (1)"));
+        assert!(!text.contains("Family Group"), "archived: out of the chats");
+        assert!(text.find("Archive (2)").unwrap() < text.find("Trash (1)").unwrap());
+
+        // Down to the archive, then in.
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+        let text = screen(&mut app);
+        assert!(text.contains("Family Group") && text.contains("Bob Dupont"));
+        assert!(!text.contains("Alice Martin"), "the inbox is not shown");
+        assert!(text.contains("r back to the inbox"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            None,
+            "archived already"
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('r'))),
+            Some(Action::Restore(1))
+        );
+        app.handle_key(key(KeyCode::Delete));
+        assert!(screen(&mut app).contains("Delete \u{201c}Family Group\u{201d}?"));
+        app.handle_key(key(KeyCode::Char('n')));
+
+        // A chat opened from a folder goes back to it.
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::Opened(1)));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(screen(&mut app).contains("Bob Dupont"));
+        assert!(!screen(&mut app).contains("Alice Martin"));
+
+        // Esc: back to the inbox, on the folder.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(screen(&mut app).contains("Alice Martin"));
+        assert_eq!(app.handle_key(key(KeyCode::Down)), None);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+        let text = screen(&mut app);
+        assert!(
+            text.contains("Chloe Renard") && !text.contains("Bob Dupont"),
+            "in the trash"
+        );
+        app.handle_key(key(KeyCode::Delete));
+        assert!(screen(&mut app).contains("Delete \u{201c}Chloe Renard\u{201d} for good?"));
+        app.handle_key(key(KeyCode::Char('n')));
+
+        // Emptied, the folder goes back to the inbox.
+        app.file_discussion(3, None);
+        let text = screen(&mut app);
+        assert!(text.contains("Chloe Renard") && text.contains("Alice Martin"));
+        assert!(!text.contains("Trash ("));
+    }
+
+    #[test]
+    fn forwarding_offers_the_inbox_only() {
+        let mut app = opened();
+        app.file_discussion(1, Some(Folder::Archive));
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Char('f')));
+        let text = screen(&mut app);
+        assert!(!text.contains("Family Group") && !text.contains("Archive ("));
     }
 }

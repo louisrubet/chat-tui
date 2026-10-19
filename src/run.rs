@@ -141,7 +141,7 @@ pub async fn run(
                         let title = chat.title.clone();
                         match backend.archive(&chat.id).await {
                             Ok(()) => {
-                                app.hide_discussion(discussion);
+                                app.file_discussion(discussion, Some(data::Folder::Archive));
                                 app.set_status(format!("Archived \u{201c}{title}\u{201d}"));
                             }
                             Err(e) => app.set_status(format!("Archiving failed: {e}")),
@@ -152,13 +152,24 @@ pub async fn run(
                         let chat = &app.discussions[discussion];
                         let title = chat.title.clone();
                         match backend.delete_chat(&chat.id).await {
+                            // Its new place (trash, or gone) comes from the backend.
                             Ok(()) => {
                                 app.hide_discussion(discussion);
-                                app.discussions[discussion].messages.clear();
-                                app.discussions[discussion].unread = 0;
                                 app.set_status(format!("Deleted \u{201c}{title}\u{201d}"));
                             }
                             Err(e) => app.set_status(format!("Deletion failed: {e}")),
+                        }
+                        continue;
+                    }
+                    Action::Restore(discussion) => {
+                        let chat = &app.discussions[discussion];
+                        let title = chat.title.clone();
+                        match backend.restore(&chat.id).await {
+                            Ok(()) => {
+                                app.file_discussion(discussion, None);
+                                app.set_status(format!("\u{201c}{title}\u{201d} is back in the inbox"));
+                            }
+                            Err(e) => app.set_status(format!("Restoring failed: {e}")),
                         }
                         continue;
                     }

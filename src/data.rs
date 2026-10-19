@@ -313,8 +313,30 @@ pub struct Discussion {
     /// Rank in the "Pinned" list (pin order: a chat pinned later comes after); `None` when
     /// not pinned.
     pub pinned: Option<u32>,
-    /// Not listed (archived, deleted… on another device); still shown while open.
+    /// Gone (deleted, for good): not listed; still shown while open.
     pub hidden: bool,
+    /// Filed away out of the chat list, which leads to it; `None` in the inbox.
+    pub folder: Option<Folder>,
+}
+
+/// Where chats are filed away, out of the chat list (in this order after it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Folder {
+    Archive,
+    Spam,
+    Trash,
+}
+
+impl Folder {
+    pub const ALL: [Folder; 3] = [Folder::Archive, Folder::Spam, Folder::Trash];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Folder::Archive => "Archive",
+            Folder::Spam => "Spam & blocked",
+            Folder::Trash => "Trash",
+        }
+    }
 }
 
 impl Discussion {
@@ -344,6 +366,7 @@ impl Discussion {
             unread: 0,
             pinned: None,
             hidden: false,
+            folder: None,
         }
     }
 
@@ -425,6 +448,7 @@ pub fn mock_discussions() -> Vec<Discussion> {
             unread: 0,
             pinned: Some(0),
             hidden: false,
+            folder: None,
             messages: vec![
                 msg(false, "Alice Martin", "Hey! Are we still on for tomorrow?", "2026-07-15 09:12"),
                 msg(true, "", "Yes, absolutely. What time works for you?", "2026-07-15 09:15"),
@@ -443,6 +467,7 @@ pub fn mock_discussions() -> Vec<Discussion> {
             unread: 2,
             pinned: None,
             hidden: false,
+            folder: None,
             messages: vec![
                 msg(false, "Mom", "Don't forget dinner on Sunday.", "2026-07-13 12:00"),
                 msg(false, "Dad", "I'll bring the wine.", "2026-07-13 12:03"),
@@ -457,6 +482,7 @@ pub fn mock_discussions() -> Vec<Discussion> {
             unread: 0,
             pinned: None,
             hidden: false,
+            folder: None,
             messages: vec![
                 msg(false, "Bob Dupont", "Did you push the fix?", "2026-07-17 10:00"),
                 msg(true, "", "Yep, just pushed it.", "2026-07-17 10:01"),
@@ -491,6 +517,7 @@ pub fn mock_discussions() -> Vec<Discussion> {
             unread: 0,
             pinned: None,
             hidden: false,
+            folder: None,
             messages: vec![
                 msg(false, "Chloe Renard", "Happy birthday!! 🎉", "2026-06-01 07:30"),
                 msg(true, "", "Thank you so much!", "2026-06-01 08:15"),
