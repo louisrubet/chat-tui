@@ -258,14 +258,20 @@ pub async fn run(
                     app.set_status("Disconnected: restart to receive new messages");
                     continue;
                 };
-                // History come after the chat was opened: its images too.
-                let history_of = match &event {
-                    Event::History { chat, .. } if history_fetched.contains(chat) => Some(chat.clone()),
+                // History come after the chat was opened: its images too. A new message: its
+                // images on arrival.
+                let images_of = match &event {
+                    Event::History { chat, .. } if history_fetched.contains(chat) => Some((chat.clone(), None)),
+                    Event::Message { chat, message, .. } if app.thumbnails.enabled() => {
+                        Some((chat.clone(), Some(message.id.clone())))
+                    }
                     _ => None,
                 };
                 handle_event(&mut app, event, &mut read_marks, &config);
-                if let Some(idx) = history_of.and_then(|chat| app.discussions.iter().position(|d| d.id == chat)) {
-                    fetch_history_images(&backend, &app.discussions[idx], &fetched_tx);
+                if let Some((chat, only)) = images_of
+                    && let Some(idx) = app.discussions.iter().position(|d| d.id == chat)
+                {
+                    fetch_images(&backend, &app.discussions[idx], only.as_ref(), &fetched_tx);
                 }
             }
         }
@@ -288,7 +294,7 @@ fn opened(
         app.set_status(format!("Cannot save the read state: {e}"));
     }
     if app.thumbnails.enabled() && history_fetched.insert(app.discussions[idx].id.clone()) {
-        fetch_history_images(backend, &app.discussions[idx], fetched);
+        fetch_images(backend, &app.discussions[idx], None, fetched);
     }
 }
 
@@ -401,13 +407,19 @@ fn handle_event(app: &mut App, event: Event, read_marks: &mut ReadMarks, config:
 }
 
 /// Downloads in the background, newest first, the history images of `discussion` (with
-/// the images of the link previews), sent to `fetched` as they come. Messages with other
-/// attachments (videos, files…) are left for `o`.
-fn fetch_history_images(backend: &impl Backend, discussion: &Discussion, fetched: &Fetched) {
+/// the images of the link previews), or only those of its message `only`, sent to `fetched`
+/// as they come. Messages with other attachments (videos, files…) are left for `o`.
+fn fetch_images(
+    backend: &impl Backend,
+    discussion: &Discussion,
+    only: Option<&MessageId>,
+    fetched: &Fetched,
+) {
     let downloads: Vec<_> = discussion
         .messages
         .iter()
         .rev()
+        .filter(|m| only.is_none_or(|id| &m.id == id))
         .filter(|m| m.needs_download() && m.images_only())
         .map(|m| (m.id.clone(), backend.download(&discussion.id, m)))
         .collect();
