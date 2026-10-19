@@ -59,6 +59,10 @@ pub enum Action {
         emoji: String,
         remove: bool,
     },
+    /// Archive `discussion`.
+    Archive(usize),
+    /// Delete `discussion` for good (confirmed).
+    DeleteChat(usize),
     /// Delete our message `msg` of `discussion` for everyone (confirmed).
     Delete {
         discussion: usize,
@@ -296,6 +300,8 @@ pub struct App {
     pub thumbnails: Thumbnails,
     /// What the backend can do.
     pub capabilities: Capabilities,
+    /// The chat whose deletion is asked to confirm, in the chat list.
+    deleting_chat: Option<usize>,
 }
 
 impl App {
@@ -317,6 +323,7 @@ impl App {
             message_page: 5,
             thumbnails: Thumbnails::default(),
             capabilities: Capabilities::default(),
+            deleting_chat: None,
         }
     }
 
@@ -431,14 +438,19 @@ impl App {
         target.is_group = update.is_group;
         target.hidden = update.hidden;
         if update.hidden {
-            let first = order(&self.discussions).first().copied();
-            if let Screen::List { selected, .. } | Screen::Forward { selected, .. } =
-                &mut self.screen
-                && *selected == discussion
-                && let Some(first) = first
-            {
-                *selected = first;
-            }
+            self.hide_discussion(discussion);
+        }
+    }
+
+    /// Hides `discussion`: no longer selected in the chat list, but still shown while open.
+    pub fn hide_discussion(&mut self, discussion: usize) {
+        self.discussions[discussion].hidden = true;
+        let first = order(&self.discussions).first().copied();
+        if let Screen::List { selected, .. } | Screen::Forward { selected, .. } = &mut self.screen
+            && *selected == discussion
+            && let Some(first) = first
+        {
+            *selected = first;
         }
     }
 
@@ -642,6 +654,13 @@ impl App {
             return None;
         }
         self.status = None;
+        if let Some(idx) = self.deleting_chat.take() {
+            if key.code == KeyCode::Char('y') {
+                return Some(Action::DeleteChat(idx));
+            }
+            self.status = Some("Not deleted".to_string());
+            return None;
+        }
         if let Screen::List { selected, .. } = self.screen
             && key.code == KeyCode::Enter
             && selected < self.discussions.len()
@@ -675,6 +694,16 @@ impl App {
                         None => Some(next_rank),
                     };
                     return Some(Action::PinToggled(idx));
+                }
+                KeyCode::Char('a')
+                    if self.capabilities.chat_actions && *selected < discussions.len() =>
+                {
+                    return Some(Action::Archive(*selected));
+                }
+                KeyCode::Delete
+                    if self.capabilities.chat_actions && *selected < discussions.len() =>
+                {
+                    self.deleting_chat = Some(*selected);
                 }
                 KeyCode::Char('p') => {
                     let back_to = *selected;
@@ -1084,6 +1113,20 @@ impl App {
         }
         let typing: Vec<usize> = self.typing.iter().map(|t| t.discussion).collect();
         self.list_page = (h as usize).saturating_sub(FOOTER).max(1);
+        let list_footer = match (self.deleting_chat, &self.status) {
+            (Some(idx), _) => format!(
+                "Delete \u{201c}{}\u{201d} and its messages for good?   y yes   any other key: no",
+                self.discussions[idx].title
+            ),
+            (None, Some(status)) => status.clone(),
+            (None, None) if self.capabilities.chat_actions => "\u{2191}/\u{2193} select chat   \
+                 Enter open   P pin/unpin   a archive   Del delete   p parameters   q quit"
+                .to_string(),
+            (None, None) => {
+                "\u{2191}/\u{2193} select chat   Enter open   P pin/unpin   p parameters   q quit"
+                    .to_string()
+            }
+        };
         match &mut self.screen {
             Screen::List { selected, scroll } => draw_list(
                 out,
@@ -1091,7 +1134,7 @@ impl App {
                 &typing,
                 Some(self.name.as_str()).filter(|name| !name.is_empty()),
                 None,
-                "\u{2191}/\u{2193} select chat   Enter open   P pin/unpin   p parameters   q quit",
+                &list_footer,
                 *selected,
                 scroll,
                 w,
@@ -2741,5 +2784,37 @@ mod tests {
             !screen(&mut app).contains("Pinned"),
             "nothing pinned is listed"
         );
+    }
+
+    #[test]
+    fn archive_and_delete_chats_from_the_list() {
+        let mut app = app();
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            None,
+            "not supported"
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Delete)), None);
+        assert!(!screen(&mut app).contains("for good"));
+        assert!(!screen(&mut app).contains("a archive"));
+
+        app.capabilities.chat_actions = true;
+        assert!(screen(&mut app).contains("a archive   Del delete"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Some(Action::Archive(0))
+        );
+        app.handle_key(key(KeyCode::Delete));
+        assert!(screen(&mut app).contains("Delete \u{201c}Alice Martin\u{201d} and its messages"));
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), None);
+        assert!(screen(&mut app).contains("Not deleted"));
+        app.handle_key(key(KeyCode::Delete));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Some(Action::DeleteChat(0))
+        );
+
+        app.hide_discussion(0);
+        assert!(!screen(&mut app).contains("Alice Martin"));
     }
 }

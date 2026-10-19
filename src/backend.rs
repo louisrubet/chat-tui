@@ -14,6 +14,9 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub struct Capabilities {
     /// How long after sending our messages can be deleted for everyone; `None`: never.
     pub delete_max_age: Option<Duration>,
+    /// Whether chats can be archived and deleted ([`Backend::archive`],
+    /// [`Backend::delete_chat`]).
+    pub chat_actions: bool,
 }
 
 /// A message to send.
@@ -112,6 +115,16 @@ pub trait Backend {
         chat: &ChatId,
         message: &Message,
     ) -> impl Future<Output = Result<Downloaded>> + 'static;
+
+    /// Archives `chat`: out of the inbox, back on a new message.
+    fn archive(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
+        async { Err("archiving is not supported".into()) }
+    }
+
+    /// Deletes `chat` and its messages, for good.
+    fn delete_chat(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
+        async { Err("deleting chats is not supported".into()) }
+    }
 
     /// `chat` was read here up to its `last` message: for the other devices to know.
     /// Nothing by default.

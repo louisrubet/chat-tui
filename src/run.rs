@@ -136,6 +136,32 @@ pub async fn run(
                         }
                         continue;
                     }
+                    Action::Archive(discussion) => {
+                        let chat = &app.discussions[discussion];
+                        let title = chat.title.clone();
+                        match backend.archive(&chat.id).await {
+                            Ok(()) => {
+                                app.hide_discussion(discussion);
+                                app.set_status(format!("Archived \u{201c}{title}\u{201d}"));
+                            }
+                            Err(e) => app.set_status(format!("Archiving failed: {e}")),
+                        }
+                        continue;
+                    }
+                    Action::DeleteChat(discussion) => {
+                        let chat = &app.discussions[discussion];
+                        let title = chat.title.clone();
+                        match backend.delete_chat(&chat.id).await {
+                            Ok(()) => {
+                                app.hide_discussion(discussion);
+                                app.discussions[discussion].messages.clear();
+                                app.discussions[discussion].unread = 0;
+                                app.set_status(format!("Deleted \u{201c}{title}\u{201d}"));
+                            }
+                            Err(e) => app.set_status(format!("Deletion failed: {e}")),
+                        }
+                        continue;
+                    }
                     Action::Delete { discussion, msg } => {
                         let chat = &app.discussions[discussion];
                         match backend.delete(&chat.id, &chat.messages[msg]).await {

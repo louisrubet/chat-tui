@@ -23,6 +23,7 @@ impl Backend for Mock {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             delete_max_age: Some(Duration::from_secs(24 * 60 * 60)),
+            chat_actions: true,
         }
     }
 
@@ -58,6 +59,14 @@ impl Backend for Mock {
         _chat: &ChatId,
         _message: &Message,
     ) -> impl Future<Output = Result<()>> + 'static {
+        async { Ok(()) }
+    }
+
+    fn archive(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
+        async { Ok(()) }
+    }
+
+    fn delete_chat(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
         async { Ok(()) }
     }
 
