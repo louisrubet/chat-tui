@@ -6,6 +6,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::data::{Attachment, ChatId, Discussion, Message, MessageId, Styled};
+use crate::recipients::Contact;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -17,6 +18,8 @@ pub struct Capabilities {
     /// Whether chats can be archived, deleted and restored ([`Backend::archive`],
     /// [`Backend::delete_chat`], [`Backend::restore`]).
     pub chat_actions: bool,
+    /// Whether chats can be started ([`Backend::contacts`], [`Backend::start_chat`]).
+    pub new_chat: bool,
 }
 
 /// A message to send.
@@ -78,6 +81,9 @@ pub enum Event {
     },
     /// A chat read on another device: none of its messages is new any more.
     Read { chat: ChatId },
+    /// Messages received while the interface was not running, once their history came:
+    /// one notification sums up those still unread.
+    Missed(Vec<(ChatId, MessageId)>),
     /// Shown in the footer, e.g. a lost connection.
     Status(String),
 }
@@ -130,6 +136,20 @@ pub trait Backend {
     /// Moves `chat` back to the inbox, from a folder.
     fn restore(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
         async { Err("restoring chats is not supported".into()) }
+    }
+
+    /// The address book, to start chats with.
+    fn contacts(&self) -> impl Future<Output = Result<Vec<Contact>>> + 'static {
+        async { Ok(Vec::new()) }
+    }
+
+    /// The chat with the people at `numbers` (a group for several), started unless it
+    /// exists already. Its messages, if any, follow as [`Event::History`].
+    fn start_chat(
+        &self,
+        _numbers: Vec<String>,
+    ) -> impl Future<Output = Result<Discussion>> + 'static {
+        async { Err("starting chats is not supported".into()) }
     }
 
     /// `chat` was read here up to its `last` message: for the other devices to know.

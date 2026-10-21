@@ -27,6 +27,7 @@ use crate::editor::Editor;
 use crate::find::{self, Found};
 use crate::fuzzy;
 use crate::graphics::Thumbnails;
+use crate::recipients::{self, Contact};
 use crate::settings::Settings;
 use crate::ui;
 
@@ -70,6 +71,10 @@ pub enum Action {
     Restore(Vec<usize>),
     /// Delete for good every chat of the trash (confirmed).
     PurgeTrash,
+    /// Pick whom to start a chat with: the contacts are needed ([`App::new_chat`]).
+    NewChat,
+    /// Start the chat with the people at these numbers.
+    StartChat(Vec<String>),
     /// Delete our message `msg` of `discussion` for everyone (confirmed).
     Delete {
         discussion: usize,
@@ -122,6 +127,53 @@ enum Screen {
     Settings { selected: usize, back_to: usize },
     /// Finding chats and messages, from the chat list.
     Find(Finding),
+    /// Picking whom to start a chat with, from the chat list.
+    NewChat(Recipients),
+}
+
+/// The people a new chat is for, as picked.
+#[derive(Debug, Clone)]
+struct Recipients {
+    /// The address book.
+    contacts: Vec<Contact>,
+    /// Picked already.
+    picked: Vec<Contact>,
+    /// A name or a number being typed.
+    query: String,
+    /// Index in [`Recipients::entries`].
+    selected: usize,
+    /// Whether the user moved among the entries: `Enter` then picks rather than starts.
+    browsing: bool,
+    scroll: usize,
+    /// The chat list selection, to go back to.
+    back_to: usize,
+}
+
+impl Recipients {
+    /// What can be picked: the number typed, if it is one, then the contacts matching.
+    fn entries(&self) -> Vec<Contact> {
+        let typed = recipients::number(&self.query).map(|number| Contact {
+            name: String::new(),
+            number,
+        });
+        typed
+            .into_iter()
+            .chain(
+                recipients::matching(&self.contacts, &self.query)
+                    .into_iter()
+                    .cloned(),
+            )
+            .collect()
+    }
+
+    /// Picks `contact` (once), and clears the query.
+    fn pick(&mut self, contact: Contact) {
+        if !self.picked.iter().any(|p| p.number == contact.number) {
+            self.picked.push(contact);
+        }
+        self.query.clear();
+        (self.selected, self.scroll, self.browsing) = (0, 0, false);
+    }
 }
 
 /// A search of chats and messages, as typed.
@@ -370,6 +422,10 @@ impl App {
 
     pub fn set_status(&mut self, status: impl Into<String>) {
         self.status = Some(status.into());
+    }
+
+    pub fn clear_status(&mut self) {
+        self.status = None;
     }
 
     fn selected_message_with_quote(&self) -> Option<(&Message, Option<&Message>)> {
@@ -912,6 +968,104 @@ impl App {
         None
     }
 
+    /// Opens the choice of whom to start a chat with, among `contacts`.
+    pub fn new_chat(&mut self, contacts: Vec<Contact>) {
+        let back_to = match self.screen {
+            Screen::List { selected, .. } => selected,
+            _ => 0,
+        };
+        self.screen = Screen::NewChat(Recipients {
+            contacts,
+            picked: Vec::new(),
+            query: String::new(),
+            selected: 0,
+            browsing: false,
+            scroll: 0,
+            back_to,
+        });
+    }
+
+    /// The chat `idx` was started: opened (from its folder), a message to type.
+    pub fn started(&mut self, idx: usize) -> Action {
+        self.folder = self.discussions[idx].folder;
+        self.finding = None;
+        let action = self.open(idx);
+        if let Screen::Discussion { composing, .. } = &mut self.screen {
+            *composing = Some(Compose::new("", None));
+        }
+        action
+    }
+
+    /// A key on the choice of whom to start a chat with: a name or a number typed, a
+    /// contact picked from those matching (`↑`/`↓`, `Enter`), numbers one after the other
+    /// (`,`); `Enter` again starts the chat.
+    fn new_chat_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Screen::NewChat(new) = &mut self.screen else {
+            return None;
+        };
+        let entries = new.entries();
+        let last = entries.len().saturating_sub(1);
+        let typed = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        match key.code {
+            KeyCode::Esc => {
+                self.screen = Screen::List {
+                    selected: new.back_to,
+                    scroll: self.list_scroll,
+                };
+            }
+            KeyCode::Up => {
+                new.selected = new.selected.saturating_sub(1);
+                new.browsing = true;
+            }
+            KeyCode::Down => {
+                new.selected = (new.selected + 1).min(last);
+                new.browsing = true;
+            }
+            KeyCode::PageUp => {
+                new.selected = new.selected.saturating_sub(self.list_page);
+                new.browsing = true;
+            }
+            KeyCode::PageDown => {
+                new.selected = (new.selected + self.list_page).min(last);
+                new.browsing = true;
+            }
+            KeyCode::Enter if new.query.trim().is_empty() && !new.browsing => {
+                if new.picked.is_empty() {
+                    self.status = Some("Type a name or a number first".to_string());
+                    return None;
+                }
+                let numbers = new.picked.iter().map(|p| p.number.clone()).collect();
+                return Some(Action::StartChat(numbers));
+            }
+            KeyCode::Enter => match entries.into_iter().nth(new.selected) {
+                Some(contact) => new.pick(contact),
+                None => self.status = Some("No contact matches, nor a number".to_string()),
+            },
+            KeyCode::Char(',' | ';') if typed => {
+                if let Some(number) = recipients::number(&new.query) {
+                    new.pick(Contact {
+                        name: String::new(),
+                        number,
+                    });
+                }
+            }
+            KeyCode::Backspace => {
+                if new.query.pop().is_none() {
+                    new.picked.pop();
+                }
+                (new.selected, new.scroll, new.browsing) = (0, 0, false);
+            }
+            KeyCode::Char(c) if typed => {
+                new.query.push(c);
+                (new.selected, new.scroll, new.browsing) = (0, 0, false);
+            }
+            _ => {}
+        }
+        None
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.kind != KeyEventKind::Press {
             return None;
@@ -934,6 +1088,9 @@ impl App {
         }
         if matches!(self.screen, Screen::Find(_)) {
             return self.find_key(key);
+        }
+        if matches!(self.screen, Screen::NewChat(_)) {
+            return self.new_chat_key(key);
         }
         if let Screen::List { selected, scroll } = &mut self.screen
             && key.code == KeyCode::Enter
@@ -997,6 +1154,10 @@ impl App {
                     if self.capabilities.chat_actions && self.folder == Some(Folder::Trash) =>
                 {
                     self.purging = true;
+                }
+                KeyCode::Char('n') if self.capabilities.new_chat && self.folder.is_none() => {
+                    self.list_scroll = *scroll;
+                    return Some(Action::NewChat);
                 }
                 KeyCode::Char('p') => {
                     let back_to = *selected;
@@ -1362,8 +1523,8 @@ impl App {
                 KeyCode::Char('q') => return Some(Action::Quit),
                 _ => {}
             },
-            // Its keys go to `find_key`.
-            Screen::Find(_) => {}
+            // Their keys go to `find_key` and `new_chat_key`.
+            Screen::Find(_) | Screen::NewChat(_) => {}
         }
         None
     }
@@ -1462,6 +1623,11 @@ impl App {
                 .to_string(),
             (None, None, Some(_)) => {
                 "\u{2191}/\u{2193} select   Enter open   Esc back   q quit".to_string()
+            }
+            (None, None, None) if actions && self.capabilities.new_chat => {
+                "\u{2191}/\u{2193} select   Enter open   n new   / find   Space mark   P pin   \
+                 a archive   Del delete   p parameters   q quit"
+                    .to_string()
             }
             (None, None, None) if actions => "\u{2191}/\u{2193} select   Enter open   / find   \
                  Space mark   P pin   a archive   Del delete   p parameters   q quit"
@@ -1573,6 +1739,25 @@ impl App {
                 w,
                 h,
             ),
+            Screen::NewChat(new) => {
+                let help = match &self.status {
+                    Some(status) => status.clone(),
+                    None if new.query.trim().is_empty()
+                        && !new.browsing
+                        && !new.picked.is_empty() =>
+                    {
+                        "Enter start the chat   type to add someone   Backspace remove   Esc back"
+                            .to_string()
+                    }
+                    None if !new.query.trim().is_empty() && new.entries().is_empty() => {
+                        "No contact matches: type a number   Esc back".to_string()
+                    }
+                    None => "type a name or a number   \u{2191}/\u{2193} select   Enter add   \
+                             , next number   Esc back"
+                        .to_string(),
+                };
+                draw_new_chat(out, new, &help, w, h)
+            }
         }
     }
 }
@@ -2036,6 +2221,76 @@ fn draw_find(
             (y + 2) as u16,
             &ui::pad_left(text, width),
             styles,
+            selected,
+        )?;
+    }
+    print_row(
+        out,
+        height.saturating_sub(1) as u16,
+        &ui::pad_left(help, width),
+        false,
+    )?;
+    Ok(())
+}
+
+/// The choice of whom to start a chat with: those picked and the query, then the number
+/// typed and the contacts matching, the selected one in view.
+fn draw_new_chat(
+    out: &mut impl Write,
+    new: &mut Recipients,
+    help: &str,
+    w: u16,
+    h: u16,
+) -> io::Result<()> {
+    let width = w as usize;
+    let height = h as usize;
+    // The recipients line and a blank one above the entries.
+    let viewport = height.saturating_sub(FOOTER + 2).max(1);
+    let entries = new.entries();
+    if new.selected < new.scroll {
+        new.scroll = new.selected;
+    }
+    if new.selected >= new.scroll + viewport {
+        new.scroll = new.selected + 1 - viewport;
+    }
+    queue!(out, Clear(ClearType::All), cursor::Hide)?;
+    let picked: Vec<&str> = new.picked.iter().map(Contact::label).collect();
+    let mut to = format!("To: {}", picked.join(", "));
+    if !picked.is_empty() {
+        to.push_str(", ");
+    }
+    let cursor = if new.browsing { "" } else { "\u{2588}" };
+    let line = format!("{to}{}{cursor}", new.query);
+    let bold = Styled {
+        start: 0,
+        end: "To:".len(),
+        style: data::Style::Bold,
+    };
+    print_styled(out, 0, &ui::pad_left(&line, width), &[bold], false)?;
+    for (y, (i, contact)) in entries
+        .iter()
+        .enumerate()
+        .skip(new.scroll)
+        .take(viewport)
+        .enumerate()
+    {
+        let (text, styles) = if contact.name.is_empty() {
+            (format!("    Number {}", contact.number), Vec::new())
+        } else {
+            let text = format!("    {} \u{b7} {}", contact.name, contact.number);
+            let styles = if recipients::number(&new.query).is_some() {
+                Vec::new()
+            } else {
+                matched(&text, &new.query, 4, contact.name.len())
+            };
+            (text, styles)
+        };
+        let selected = i == new.selected && (new.browsing || !new.query.trim().is_empty());
+        print_styled(
+            out,
+            (y + 2) as u16,
+            &ui::pad_left(&text, width),
+            &styles,
             selected,
         )?;
     }
@@ -3851,5 +4106,53 @@ mod tests {
         app.handle_key(key(KeyCode::Char('f')));
         let text = screen(&mut app);
         assert!(!text.contains("Family Group") && !text.contains("Archive ("));
+    }
+
+    #[test]
+    fn new_chat_with_contacts_and_numbers() {
+        let mut app = App::new(data::mock_discussions());
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), None, "not supported");
+        app.capabilities.new_chat = true;
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Some(Action::NewChat));
+        let contact = |name: &str, number: &str| Contact {
+            name: name.to_string(),
+            number: number.to_string(),
+        };
+        app.new_chat(vec![
+            contact("Zoé", "+33612345678"),
+            contact("Alain", "+33698765432"),
+        ]);
+        assert!(screen(&mut app).contains("Alain \u{b7} +33698765432"));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(screen(&mut app).contains("Type a name or a number first"));
+        for c in "zo".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(!screen(&mut app).contains("Alain"));
+        app.handle_key(key(KeyCode::Enter));
+        for c in "06 11 22 33 44,".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(screen(&mut app).contains("To: Zoé, 0611223344, Alain"));
+        app.handle_key(key(KeyCode::Backspace));
+        assert!(screen(&mut app).contains("To: Zoé, 0611223344,"));
+        assert!(screen(&mut app).contains("Enter start the chat"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Action::StartChat(vec![
+                "+33612345678".to_string(),
+                "0611223344".to_string()
+            ]))
+        );
+
+        let idx = app.push_discussion(Discussion::new("new", "0611223344"));
+        assert_eq!(app.started(idx), Action::Opened(idx));
+        assert!(matches!(
+            app.screen,
+            Screen::Discussion { composing: Some(_), .. }
+        ));
     }
 }

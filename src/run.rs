@@ -10,7 +10,7 @@ use crossterm::terminal;
 use futures::{FutureExt, Stream, StreamExt};
 
 use crate::backend::{Backend, Downloaded, Draft, Event};
-use crate::data::{self, ChatId, Discussion, MessageId};
+use crate::data::{self, ChatId, Discussion, Folder, MessageId};
 use crate::graphics::Thumbnails;
 use crate::settings::Settings;
 use crate::store::{Pins, ReadMarks};
@@ -151,6 +151,48 @@ pub async fn run(
                     Action::PurgeTrash => {
                         let trash = app.trash();
                         file_chats(&mut app, &backend, &mut out, (w, h), ChatOp::Purge, trash).await?;
+                        continue;
+                    }
+                    Action::NewChat => {
+                        app.set_status("Loading the contacts\u{2026}");
+                        app.draw(&mut out, w, h)?;
+                        out.flush()?;
+                        let contacts = backend.contacts().await;
+                        app.clear_status();
+                        match contacts {
+                            Ok(contacts) => app.new_chat(contacts),
+                            Err(e) => {
+                                app.new_chat(Vec::new());
+                                app.set_status(format!("Cannot load the contacts: {e}"));
+                            }
+                        }
+                        continue;
+                    }
+                    Action::StartChat(numbers) => {
+                        app.set_status("Starting the chat\u{2026}");
+                        app.draw(&mut out, w, h)?;
+                        out.flush()?;
+                        let started = backend.start_chat(numbers).await;
+                        app.clear_status();
+                        match started {
+                            Ok(mut discussion) => {
+                                let idx = match app.discussions.iter().position(|d| d.id == discussion.id) {
+                                    Some(idx) => {
+                                        app.update_discussion(idx, discussion);
+                                        idx
+                                    }
+                                    None => {
+                                        discussion.pinned = pins.rank(&discussion.id);
+                                        discussion.unread = read_marks.unread_count(&discussion);
+                                        app.push_discussion(discussion)
+                                    }
+                                };
+                                if let Action::Opened(idx) = app.started(idx) {
+                                    opened(&mut app, idx, &backend, &mut read_marks, &mut history_fetched, &fetched_tx);
+                                }
+                            }
+                            Err(e) => app.set_status(format!("Cannot start the chat: {e}")),
+                        }
                         continue;
                     }
                     Action::Restore(chats) => {
@@ -373,12 +415,9 @@ fn handle_event(
             // Known already (sent from here, updated): replaced, not notified.
             let new = app.discussions[idx].position_of(&message.id).is_none();
             if new && app.settings.notifications && !message.from_me && !app.is_open(idx) {
-                notify(
-                    &config.name,
-                    &app.discussions[idx],
-                    &message.sender_name,
-                    &message.summary(),
-                );
+                let discussion = &app.discussions[idx];
+                let body = notice_body(discussion, &message.sender_name, &message.summary());
+                notify(&config.name, &discussion.title, &body);
             }
             // Written to: listed again (as the phones do).
             if new && !message.from_me {
@@ -447,7 +486,67 @@ fn handle_event(
                 }
             }
         }
+        Event::Missed(messages) => {
+            if app.settings.notifications
+                && let Some((summary, body)) = missed_notice(app, &messages)
+            {
+                notify(&config.name, &summary, &body);
+            }
+        }
         Event::Status(status) => app.set_status(status),
+    }
+}
+
+/// The notification of `missed` messages, those still unread in chats not open (spam and
+/// trash left out): as for a message received if there is one, else their number and their
+/// chats.
+fn missed_notice(app: &App, missed: &[(ChatId, MessageId)]) -> Option<(String, String)> {
+    // By chat, in the order of `missed`: the chat and its messages.
+    let mut chats: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (chat, id) in missed {
+        let Some(idx) = app.discussions.iter().position(|d| &d.id == chat) else {
+            continue;
+        };
+        let discussion = &app.discussions[idx];
+        if discussion.hidden
+            || app.is_open(idx)
+            || matches!(discussion.folder, Some(Folder::Spam | Folder::Trash))
+        {
+            continue;
+        }
+        let Some(i) = discussion.position_of(id) else {
+            continue;
+        };
+        if discussion.messages[i].from_me || discussion.first_unread().is_none_or(|first| i < first)
+        {
+            continue;
+        }
+        match chats.iter_mut().find(|(c, _)| *c == idx) {
+            Some((_, messages)) if !messages.contains(&i) => messages.push(i),
+            Some(_) => {}
+            None => chats.push((idx, vec![i])),
+        }
+    }
+    match chats.as_slice() {
+        [] => None,
+        [(idx, messages)] if messages.len() == 1 => {
+            let discussion = &app.discussions[*idx];
+            let message = &discussion.messages[messages[0]];
+            let body = notice_body(discussion, &message.sender_name, &message.summary());
+            Some((discussion.title.clone(), body))
+        }
+        _ => {
+            let count: usize = chats.iter().map(|(_, messages)| messages.len()).sum();
+            let body = chats
+                .iter()
+                .map(|(idx, messages)| match messages.len() {
+                    1 => app.discussions[*idx].title.clone(),
+                    n => format!("{} ({n})", app.discussions[*idx].title),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some((format!("{count} new messages"), body))
+        }
     }
 }
 
@@ -500,16 +599,20 @@ fn fetch_images(
 /// when it failed).
 type Fetched = futures::channel::mpsc::UnboundedSender<(String, MessageId, Option<Downloaded>)>;
 
-/// Desktop notification for a received message: the chat as title, the text as body
-/// (prefixed by the sender in groups).
-fn notify(app_name: &str, discussion: &Discussion, sender_name: &str, text: &str) {
-    let summary = discussion.title.clone();
-    let body = if discussion.is_group {
+/// The notification body of a message received in `discussion`: its text, prefixed by the
+/// sender in groups.
+fn notice_body(discussion: &Discussion, sender_name: &str, text: &str) -> String {
+    if discussion.is_group {
         format!("{sender_name}: {text}")
     } else {
         text.to_string()
-    };
-    let app_name = app_name.to_string();
+    }
+}
+
+/// Desktop notification: for a received message, the chat as `summary` and the text as
+/// `body`.
+fn notify(app_name: &str, summary: &str, body: &str) {
+    let (app_name, summary, body) = (app_name.to_string(), summary.to_string(), body.to_string());
     // Notification servers block on D-Bus / OS calls: keep them off the event loop.
     // Failures (no notification server…) are not worth interrupting the user for.
     tokio::task::spawn_blocking(move || {
@@ -613,4 +716,71 @@ async fn file_chats(
     };
     app.set_status(status);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::Message;
+
+    fn received(id: &str, sender: &str) -> Message {
+        let mut m = Message::mine(id, format!("text {id}"), None, false);
+        m.from_me = false;
+        m.sender_name = sender.to_string();
+        m
+    }
+
+    fn chat(id: &str, messages: &[&str], unread: usize) -> Discussion {
+        let mut d = Discussion::new(id, id.to_uppercase());
+        d.messages = messages.iter().map(|m| received(m, "Ann")).collect();
+        d.unread = unread;
+        d
+    }
+
+    fn missed(ids: &[(&str, &str)]) -> Vec<(ChatId, MessageId)> {
+        ids.iter()
+            .map(|(c, m)| (c.to_string(), m.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn one_missed_message_is_notified_as_received() {
+        let app = App::new(vec![chat("a", &["a1", "a2"], 1)]);
+        assert_eq!(
+            missed_notice(&app, &missed(&[("a", "a2")])),
+            Some(("A".to_string(), "text a2".to_string()))
+        );
+        assert_eq!(
+            missed_notice(&app, &missed(&[("a", "a1")])),
+            None,
+            "read already"
+        );
+    }
+
+    #[test]
+    fn missed_messages_are_summed_up_by_chat() {
+        let mut spam = chat("s", &["s1"], 1);
+        spam.folder = Some(Folder::Spam);
+        let app = App::new(vec![
+            chat("a", &["a1", "a2"], 2),
+            chat("b", &["b1"], 1),
+            chat("c", &["c1"], 0),
+            spam,
+        ]);
+        let notice = missed_notice(
+            &app,
+            &missed(&[
+                ("b", "b1"),
+                ("a", "a1"),
+                ("a", "a2"),
+                ("c", "c1"),
+                ("s", "s1"),
+                ("x", "x1"),
+            ]),
+        );
+        assert_eq!(
+            notice,
+            Some(("3 new messages".to_string(), "B, A (2)".to_string()))
+        );
+    }
 }

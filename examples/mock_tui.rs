@@ -11,7 +11,8 @@ use std::io;
 use std::time::Duration;
 
 use chat_tui::backend::Result;
-use chat_tui::data::{self, ChatId, Message};
+use chat_tui::data::{self, ChatId, Discussion, Message};
+use chat_tui::recipients::Contact;
 use chat_tui::{Backend, Capabilities, Config, Downloaded, Draft};
 
 /// Sends locally, and has nothing to download.
@@ -24,6 +25,7 @@ impl Backend for Mock {
         Capabilities {
             delete_max_age: Some(Duration::from_secs(24 * 60 * 60)),
             chat_actions: true,
+            new_chat: true,
         }
     }
 
@@ -72,6 +74,32 @@ impl Backend for Mock {
 
     fn restore(&self, _chat: &ChatId) -> impl Future<Output = Result<()>> + 'static {
         async { Ok(()) }
+    }
+
+    fn contacts(&self) -> impl Future<Output = Result<Vec<Contact>>> + 'static {
+        let contact = |name: &str, number: &str| Contact {
+            name: name.to_string(),
+            number: number.to_string(),
+        };
+        async move {
+            Ok(vec![
+                contact("Alice", "+33612345678"),
+                contact("Bob", "+33698765432"),
+                contact("Chloé", "+33711223344"),
+            ])
+        }
+    }
+
+    /// A chat named after its numbers, empty.
+    fn start_chat(
+        &self,
+        numbers: Vec<String>,
+    ) -> impl Future<Output = Result<Discussion>> + 'static {
+        async move {
+            let mut discussion = Discussion::new(numbers.join(","), numbers.join(", "));
+            discussion.is_group = numbers.len() > 1;
+            Ok(discussion)
+        }
     }
 
     fn download(
