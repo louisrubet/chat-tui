@@ -8,6 +8,7 @@
 pub mod backend;
 pub mod data;
 pub mod editor;
+pub mod find;
 pub mod fuzzy;
 pub mod graphics;
 pub mod qr;

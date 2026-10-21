@@ -24,6 +24,7 @@ use crossterm::{
 use crate::backend::Capabilities;
 use crate::data::{self, Discussion, Folder, Message, MessageId, Styled};
 use crate::editor::Editor;
+use crate::find::{self, Found};
 use crate::fuzzy;
 use crate::graphics::Thumbnails;
 use crate::settings::Settings;
@@ -50,8 +51,10 @@ pub enum Action {
     },
     /// [`App::settings`] changed: save them.
     SettingsChanged,
-    /// The discussion was pinned or unpinned ([`Discussion::pinned`]): save it.
-    PinToggled(usize),
+    /// The discussions were pinned or unpinned ([`Discussion::pinned`]): save them.
+    PinToggled(Vec<usize>),
+    /// The pinned discussions were reordered ([`Discussion::pinned`]): save their order.
+    PinsReordered,
     /// Set our reaction `emoji` to message `msg` of `discussion`, or remove it.
     React {
         discussion: usize,
@@ -59,12 +62,14 @@ pub enum Action {
         emoji: String,
         remove: bool,
     },
-    /// Archive `discussion`.
-    Archive(usize),
-    /// Delete `discussion` (confirmed).
-    DeleteChat(usize),
-    /// Move `discussion` back to the inbox, from its folder.
-    Restore(usize),
+    /// Archive the discussions.
+    Archive(Vec<usize>),
+    /// Delete the discussions (confirmed).
+    DeleteChat(Vec<usize>),
+    /// Move the discussions back to the inbox, from their folder.
+    Restore(Vec<usize>),
+    /// Delete for good every chat of the trash (confirmed).
+    PurgeTrash,
     /// Delete our message `msg` of `discussion` for everyone (confirmed).
     Delete {
         discussion: usize,
@@ -115,6 +120,22 @@ enum Screen {
     },
     /// The parameters, opened from the discussion list (`back_to` is its selection).
     Settings { selected: usize, back_to: usize },
+    /// Finding chats and messages, from the chat list.
+    Find(Finding),
+}
+
+/// A search of chats and messages, as typed.
+#[derive(Debug, Clone)]
+struct Finding {
+    query: String,
+    results: Vec<Found>,
+    /// Index in `results`.
+    selected: usize,
+    scroll: usize,
+    /// Whether the keys go to the results (actions on chats) rather than to the query.
+    browsing: bool,
+    /// The selection of the chat list, to go back to.
+    back_to: usize,
 }
 
 /// A parameter shown on the parameters screen: label and the setting it toggles.
@@ -304,8 +325,14 @@ pub struct App {
     pub thumbnails: Thumbnails,
     /// What the backend can do.
     pub capabilities: Capabilities,
-    /// The chat whose deletion is asked to confirm, in the chat list.
-    deleting_chat: Option<usize>,
+    /// The chats whose deletion is asked to confirm, in the chat list.
+    deleting_chat: Option<Vec<usize>>,
+    /// The chats marked in the chat list (`Space`), for the next action on chats.
+    marked: Vec<usize>,
+    /// The search a chat was opened from, shown again when it is left.
+    finding: Option<Finding>,
+    /// Whether purging the trash is asked to confirm.
+    purging: bool,
     /// The folder shown by the chat list; `None` for the inbox.
     folder: Option<Folder>,
 }
@@ -334,6 +361,9 @@ impl App {
             thumbnails: Thumbnails::default(),
             capabilities: Capabilities::default(),
             deleting_chat: None,
+            marked: Vec::new(),
+            finding: None,
+            purging: false,
             folder: None,
         }
     }
@@ -444,30 +474,48 @@ impl App {
     /// The title, kind, folder and visibility of `discussion` changed to those of `update`.
     /// Out of the list shown, it is no longer selected there (but stays shown while open).
     pub fn update_discussion(&mut self, discussion: usize, update: Discussion) {
+        let before = self.shown_entries();
         let target = &mut self.discussions[discussion];
         target.title = update.title;
         target.is_group = update.is_group;
         target.hidden = update.hidden;
         target.folder = update.folder;
-        self.keep_selection();
+        self.keep_selection(&before);
     }
 
     /// Hides `discussion` (gone): no longer selected in the chat list, but still shown while
     /// open.
     pub fn hide_discussion(&mut self, discussion: usize) {
+        let before = self.shown_entries();
         self.discussions[discussion].hidden = true;
-        self.keep_selection();
+        self.keep_selection(&before);
     }
 
     /// Moves `discussion` to `folder` (`None`: the inbox).
     pub fn file_discussion(&mut self, discussion: usize, folder: Option<Folder>) {
+        let before = self.shown_entries();
         self.discussions[discussion].folder = folder;
-        self.keep_selection();
+        self.keep_selection(&before);
     }
 
-    /// A selection of the chat list gone from it (chat moved, folder emptied) goes to its
-    /// first entry; an empty folder shown goes back to the inbox.
-    fn keep_selection(&mut self) {
+    /// The chats of the trash.
+    pub fn trash(&self) -> Vec<usize> {
+        order(&self.discussions, Some(Folder::Trash))
+    }
+
+    /// The entries of the list shown (chats, then folders), if any.
+    fn shown_entries(&self) -> Vec<usize> {
+        match &self.screen {
+            Screen::List { .. } => entries(&self.discussions, self.folder, true),
+            Screen::Forward { .. } => entries(&self.discussions, None, false),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A selection of the chat list gone from it (chat moved, archived, deleted) goes to the
+    /// entry taking its place among those shown `before`, the next ones moving up by one
+    /// (the last one when it was the last); an empty folder shown goes back to the inbox.
+    fn keep_selection(&mut self, before: &[usize]) {
         if let Some(folder) = self.folder
             && order(&self.discussions, Some(folder)).is_empty()
         {
@@ -483,10 +531,12 @@ impl App {
             Screen::Forward { selected, .. } => (selected, entries(&self.discussions, None, false)),
             _ => return,
         };
+        self.marked.retain(|m| entries.contains(m));
         if !entries.contains(selected)
-            && let Some(&first) = entries.first()
+            && let Some(&last) = entries.last()
         {
-            *selected = first;
+            let place = before.iter().position(|e| e == selected).unwrap_or(0);
+            *selected = entries.get(place).copied().unwrap_or(last);
         }
     }
 
@@ -685,17 +735,206 @@ impl App {
         Action::Opened(idx)
     }
 
+    /// Moves the pinned chat `chat` one place `up` (or down) among the pinned chats of the
+    /// inbox: whether it moved.
+    fn move_pinned(&mut self, chat: usize, up: bool) -> bool {
+        if self.folder.is_some()
+            || self
+                .discussions
+                .get(chat)
+                .is_none_or(|d| d.pinned.is_none())
+        {
+            return false;
+        }
+        let pinned: Vec<usize> = order(&self.discussions, None)
+            .into_iter()
+            .filter(|&i| self.discussions[i].pinned.is_some())
+            .collect();
+        let Some(at) = pinned.iter().position(|&i| i == chat) else {
+            return false;
+        };
+        let Some(&other) = (if up {
+            at.checked_sub(1).and_then(|at| pinned.get(at))
+        } else {
+            pinned.get(at + 1)
+        }) else {
+            return false;
+        };
+        let rank = self.discussions[chat].pinned;
+        self.discussions[chat].pinned = self.discussions[other].pinned;
+        self.discussions[other].pinned = rank;
+        true
+    }
+
+    /// `P` (pin), `a` (archive), `r` (restore) or `Del` (delete, once confirmed) on the
+    /// chats marked among `list`, else on the `selected` one: `None` for another key, else
+    /// the action to do, if any. Marks are cleared once acted on.
+    fn chat_command(
+        &mut self,
+        code: KeyCode,
+        list: &[usize],
+        selected: usize,
+    ) -> Option<Option<Action>> {
+        let chats = targets(&self.marked, list, selected);
+        let actions = self.capabilities.chat_actions;
+        let folder_is = |pred: fn(Option<Folder>) -> bool| -> Vec<usize> {
+            chats
+                .iter()
+                .copied()
+                .filter(|&i| pred(self.discussions[i].folder))
+                .collect()
+        };
+        let action = match code {
+            KeyCode::Char('P') if !chats.is_empty() => {
+                // Pinned unless all are: pinning again puts the chats at the end of the
+                // pinned list.
+                let pin = chats.iter().any(|&i| self.discussions[i].pinned.is_none());
+                let mut next_rank = self
+                    .discussions
+                    .iter()
+                    .filter_map(|d| d.pinned)
+                    .max()
+                    .map_or(0, |r| r + 1);
+                for &i in &chats {
+                    let discussion = &mut self.discussions[i];
+                    if !pin {
+                        discussion.pinned = None;
+                    } else if discussion.pinned.is_none() {
+                        discussion.pinned = Some(next_rank);
+                        next_rank += 1;
+                    }
+                }
+                Action::PinToggled(chats)
+            }
+            // Archived from the inbox, restored from a folder.
+            KeyCode::Char('a') if actions && !folder_is(|f| f.is_none()).is_empty() => {
+                Action::Archive(folder_is(|f| f.is_none()))
+            }
+            KeyCode::Char('r') if actions && !folder_is(|f| f.is_some()).is_empty() => {
+                Action::Restore(folder_is(|f| f.is_some()))
+            }
+            KeyCode::Delete if actions && !chats.is_empty() => {
+                self.deleting_chat = Some(chats);
+                return Some(None);
+            }
+            _ => return None,
+        };
+        self.marked.clear();
+        Some(Some(action))
+    }
+
+    /// A key on the search: typed in the query, until `Enter` (or `↓`) goes to the results;
+    /// there, moving among them, acting on the chats found as in the chat list, opening one
+    /// (`Enter`).
+    fn find_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Screen::Find(finding) = &mut self.screen else {
+            return None;
+        };
+        let last = finding.results.len().saturating_sub(1);
+        // The chats found and shown, and the one selected (none on a message).
+        let chats: Vec<usize> = finding
+            .results
+            .iter()
+            .filter_map(|f| match f {
+                Found::Chat(i) if !self.discussions[*i].hidden => Some(*i),
+                _ => None,
+            })
+            .collect();
+        let selected_chat = match finding.results.get(finding.selected) {
+            Some(Found::Chat(i)) => *i,
+            _ => usize::MAX,
+        };
+        let typed = |key: &KeyEvent| {
+            !key.modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        };
+        match key.code {
+            KeyCode::Esc if finding.browsing && !self.marked.is_empty() => self.marked.clear(),
+            KeyCode::Esc => {
+                self.screen = Screen::List {
+                    selected: finding.back_to,
+                    scroll: self.list_scroll,
+                };
+            }
+            KeyCode::Up if finding.browsing && finding.selected == 0 => finding.browsing = false,
+            KeyCode::Up => finding.selected = finding.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Enter if !finding.browsing => {
+                finding.browsing = !finding.results.is_empty()
+            }
+            KeyCode::Down => finding.selected = (finding.selected + 1).min(last),
+            KeyCode::PageUp => finding.selected = finding.selected.saturating_sub(self.list_page),
+            KeyCode::PageDown => finding.selected = (finding.selected + self.list_page).min(last),
+            KeyCode::Enter => {
+                let found = finding.results.get(finding.selected)?.clone();
+                self.finding = Some(finding.clone());
+                let (chat, msg) = match found {
+                    Found::Chat(chat) => (chat, None),
+                    Found::Message(chat, id) => (chat, self.discussions[chat].position_of(&id)),
+                };
+                let action = self.open(chat);
+                if let (
+                    Some(msg),
+                    Screen::Discussion {
+                        selected_msg,
+                        selecting,
+                        ..
+                    },
+                ) = (msg, &mut self.screen)
+                {
+                    *selected_msg = msg;
+                    *selecting = true;
+                }
+                return Some(action);
+            }
+            KeyCode::Char('/') if finding.browsing => finding.browsing = false,
+            KeyCode::Char(' ') if finding.browsing => {
+                if selected_chat != usize::MAX {
+                    toggle(&mut self.marked, selected_chat);
+                    finding.selected = (finding.selected + 1).min(last);
+                }
+            }
+            KeyCode::Char('P' | 'a' | 'r') | KeyCode::Delete if finding.browsing => {
+                return self.chat_command(key.code, &chats, selected_chat).flatten();
+            }
+            KeyCode::Char(_) if finding.browsing => {}
+            KeyCode::Backspace => {
+                finding.browsing = false;
+                finding.query.pop();
+                finding.results = find::find(&self.discussions, &finding.query);
+                (finding.selected, finding.scroll) = (0, 0);
+            }
+            KeyCode::Char(c) if typed(&key) => {
+                finding.query.push(c);
+                finding.results = find::find(&self.discussions, &finding.query);
+                (finding.selected, finding.scroll) = (0, 0);
+            }
+            _ => {}
+        }
+        None
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.kind != KeyEventKind::Press {
             return None;
         }
         self.status = None;
-        if let Some(idx) = self.deleting_chat.take() {
+        if let Some(chats) = self.deleting_chat.take() {
             if key.code == KeyCode::Char('y') {
-                return Some(Action::DeleteChat(idx));
+                self.marked.clear();
+                return Some(Action::DeleteChat(chats));
             }
             self.status = Some("Not deleted".to_string());
             return None;
+        }
+        if std::mem::take(&mut self.purging) {
+            if key.code == KeyCode::Char('y') {
+                return Some(Action::PurgeTrash);
+            }
+            self.status = Some("Not purged".to_string());
+            return None;
+        }
+        if matches!(self.screen, Screen::Find(_)) {
+            return self.find_key(key);
         }
         if let Screen::List { selected, scroll } = &mut self.screen
             && key.code == KeyCode::Enter
@@ -705,6 +944,7 @@ impl App {
                 return Some(self.open(selected));
             }
             if let Some(folder) = entry_folder(*selected) {
+                self.marked.clear();
                 self.folder = Some(folder);
                 *selected = order(&self.discussions, self.folder)
                     .first()
@@ -720,44 +960,45 @@ impl App {
 
         match &mut self.screen {
             Screen::List { selected, scroll } => match key.code {
+                // A pinned chat moved among the pinned ones.
+                KeyCode::Up | KeyCode::Down
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+                {
+                    let selected = *selected;
+                    let up = key.code == KeyCode::Up;
+                    return self
+                        .move_pinned(selected, up)
+                        .then_some(Action::PinsReordered);
+                }
                 KeyCode::Up => *selected = step(&list, *selected, -1),
                 KeyCode::Down => *selected = step(&list, *selected, 1),
                 KeyCode::PageUp => *selected = step(&list, *selected, -(self.list_page as isize)),
                 KeyCode::PageDown => *selected = step(&list, *selected, self.list_page as isize),
-                KeyCode::Char('P') if *selected < discussions.len() => {
-                    let idx = *selected;
-                    // Pinning again puts the chat at the end of the pinned list.
-                    let next_rank = self
-                        .discussions
-                        .iter()
-                        .filter_map(|d| d.pinned)
-                        .max()
-                        .map_or(0, |r| r + 1);
-                    let discussion = &mut self.discussions[idx];
-                    discussion.pinned = match discussion.pinned {
-                        Some(_) => None,
-                        None => Some(next_rank),
-                    };
-                    return Some(Action::PinToggled(idx));
+                KeyCode::Char('/') => {
+                    self.list_scroll = *scroll;
+                    self.screen = Screen::Find(Finding {
+                        query: String::new(),
+                        results: Vec::new(),
+                        selected: 0,
+                        scroll: 0,
+                        browsing: false,
+                        back_to: *selected,
+                    });
                 }
-                KeyCode::Char('a')
-                    if self.capabilities.chat_actions
-                        && self.folder.is_none()
-                        && *selected < discussions.len() =>
-                {
-                    return Some(Action::Archive(*selected));
+                KeyCode::Char(' ') if *selected < discussions.len() => {
+                    toggle(&mut self.marked, *selected);
+                    *selected = step(&list, *selected, 1);
                 }
-                KeyCode::Char('r')
-                    if self.capabilities.chat_actions
-                        && self.folder.is_some()
-                        && *selected < discussions.len() =>
-                {
-                    return Some(Action::Restore(*selected));
+                KeyCode::Char('P' | 'a' | 'r') | KeyCode::Delete => {
+                    let selected = *selected;
+                    return self.chat_command(key.code, &list, selected).flatten();
                 }
-                KeyCode::Delete
-                    if self.capabilities.chat_actions && *selected < discussions.len() =>
+                KeyCode::Char('X')
+                    if self.capabilities.chat_actions && self.folder == Some(Folder::Trash) =>
                 {
-                    self.deleting_chat = Some(*selected);
+                    self.purging = true;
                 }
                 KeyCode::Char('p') => {
                     let back_to = *selected;
@@ -767,6 +1008,7 @@ impl App {
                         back_to,
                     };
                 }
+                KeyCode::Esc if !self.marked.is_empty() => self.marked.clear(),
                 KeyCode::Esc if self.folder.is_some() => {
                     *selected = self.folder.take().map_or(0, folder_entry);
                     *scroll = 0;
@@ -983,9 +1225,12 @@ impl App {
                         KeyCode::Esc if *selecting => *selecting = false,
                         KeyCode::Esc => {
                             let back_to = *discussion_idx;
-                            self.screen = Screen::List {
-                                selected: back_to,
-                                scroll: self.list_scroll,
+                            self.screen = match self.finding.take() {
+                                Some(finding) => Screen::Find(finding),
+                                None => Screen::List {
+                                    selected: back_to,
+                                    scroll: self.list_scroll,
+                                },
                             };
                         }
                         KeyCode::Char('q') => return Some(Action::Quit),
@@ -1119,6 +1364,8 @@ impl App {
                 KeyCode::Char('q') => return Some(Action::Quit),
                 _ => {}
             },
+            // Its keys go to `find_key`.
+            Screen::Find(_) => {}
         }
         None
     }
@@ -1172,36 +1419,80 @@ impl App {
         let typing: Vec<usize> = self.typing.iter().map(|t| t.discussion).collect();
         self.list_page = (h as usize).saturating_sub(FOOTER).max(1);
         let actions = self.capabilities.chat_actions;
-        let list_footer = match (self.deleting_chat, &self.status, self.folder) {
-            (Some(idx), ..) => format!(
-                "Delete \u{201c}{}\u{201d}{}?   y yes   any other key: no",
-                self.discussions[idx].title,
-                if self.folder == Some(Folder::Trash) {
-                    " for good"
+        let for_good = match &self.deleting_chat {
+            Some(chats)
+                if chats
+                    .iter()
+                    .all(|&i| self.discussions[i].folder == Some(Folder::Trash)) =>
+            {
+                " for good"
+            }
+            _ => "",
+        };
+        let marked = self.marked.len();
+        let list_footer = match (&self.deleting_chat, &self.status, self.folder) {
+            (Some(chats), ..) if chats.len() == 1 => format!(
+                "Delete \u{201c}{}\u{201d}{for_good}?   y yes   any other key: no",
+                self.discussions[chats[0]].title,
+            ),
+            (Some(chats), ..) => format!(
+                "Delete the {} marked chats{for_good}?   y yes   any other key: no",
+                chats.len(),
+            ),
+            (None, ..) if self.purging => format!(
+                "Purge the {} chats of the trash for good?   y yes   any other key: no",
+                self.trash().len()
+            ),
+            (None, Some(status), _) => status.clone(),
+            (None, None, Some(_)) if actions && marked > 0 => format!(
+                "{marked} marked   Space mark/unmark   r restore   Del delete   \
+                 Esc unmark"
+            ),
+            (None, None, None) if marked > 0 => format!(
+                "{marked} marked   Space mark/unmark   P pin{}   Esc unmark",
+                if actions {
+                    "   a archive   Del delete"
                 } else {
                     ""
                 }
             ),
-            (None, Some(status), _) => status.clone(),
-            (None, None, Some(_)) if actions => "\u{2191}/\u{2193} select chat   Enter open   \
-                 r back to the inbox   Del delete   Esc back   q quit"
+            (None, None, Some(Folder::Trash)) if actions => "\u{2191}/\u{2193} select   \
+                 Enter open   Space mark   r restore   Del delete   X purge   Esc back   q quit"
+                .to_string(),
+            (None, None, Some(_)) if actions => "\u{2191}/\u{2193} select   Enter open   \
+                 Space mark   r restore   Del delete   Esc back   q quit"
                 .to_string(),
             (None, None, Some(_)) => {
-                "\u{2191}/\u{2193} select chat   Enter open   Esc back   q quit".to_string()
+                "\u{2191}/\u{2193} select   Enter open   Esc back   q quit".to_string()
             }
-            (None, None, None) if actions => "\u{2191}/\u{2193} select chat   Enter open   \
-                 P pin/unpin   a archive   Del delete   p parameters   q quit"
+            (None, None, None) if actions => "\u{2191}/\u{2193} select   Enter open   / find   \
+                 Space mark   P pin   a archive   Del delete   p parameters   q quit"
                 .to_string(),
-            (None, None, None) => {
-                "\u{2191}/\u{2193} select chat   Enter open   P pin/unpin   p parameters   q quit"
-                    .to_string()
+            (None, None, None) => "\u{2191}/\u{2193} select   Enter open   / find   Space mark   \
+                 P pin   \
+                 p parameters   q quit"
+                .to_string(),
+        };
+        let find_footer = match (&self.screen, &self.deleting_chat, &self.status) {
+            (_, Some(_), _) | (_, None, Some(_)) => list_footer.clone(),
+            (Screen::Find(f), ..) if f.browsing && marked > 0 => format!(
+                "{marked} marked   Space mark/unmark   P pin   a archive   r restore   \
+                 Del delete   Esc unmark"
+            ),
+            (Screen::Find(f), ..) if f.browsing => "\u{2191}/\u{2193} select   Enter open   \
+                 Space mark   P pin   a archive   r restore   Del delete   / edit   Esc back"
+                .to_string(),
+            (Screen::Find(f), ..) if !f.query.trim().is_empty() && f.results.is_empty() => {
+                "Nothing found   Esc back".to_string()
             }
+            _ => "type to find   Enter results   Esc back".to_string(),
         };
         match &mut self.screen {
             Screen::List { selected, scroll } => draw_list(
                 out,
                 &self.discussions,
                 &typing,
+                &self.marked,
                 Some((self.name.as_str(), self.version.as_str()))
                     .filter(|(name, _)| !name.is_empty()),
                 None,
@@ -1256,6 +1547,7 @@ impl App {
                 out,
                 &self.discussions,
                 &typing,
+                &[],
                 None,
                 Some("Forward to\u{2026}"),
                 None,
@@ -1271,6 +1563,15 @@ impl App {
                 &mut self.settings,
                 *selected,
                 self.status.as_deref(),
+                w,
+                h,
+            ),
+            Screen::Find(finding) => draw_find(
+                out,
+                &self.discussions,
+                &self.marked,
+                finding,
+                &find_footer,
                 w,
                 h,
             ),
@@ -1375,6 +1676,30 @@ fn order(discussions: &[Discussion], folder: Option<Folder>) -> Vec<usize> {
         .partition(|&i| discussions[i].pinned.is_some());
     pinned.sort_by_key(|&i| discussions[i].pinned);
     pinned.into_iter().chain(others).collect()
+}
+
+/// The chats an action is for: those `marked`, in the order of the `list`, else the
+/// `selected` one if a chat.
+fn targets(marked: &[usize], list: &[usize], selected: usize) -> Vec<usize> {
+    if marked.is_empty() {
+        list.iter()
+            .copied()
+            .filter(|&e| e == selected && entry_folder(e).is_none())
+            .collect()
+    } else {
+        list.iter()
+            .copied()
+            .filter(|e| marked.contains(e))
+            .collect()
+    }
+}
+
+/// Marks `chat`, or unmarks it.
+fn toggle(marked: &mut Vec<usize>, chat: usize) {
+    match marked.iter().position(|&m| m == chat) {
+        Some(i) => _ = marked.remove(i),
+        None => marked.push(chat),
+    }
 }
 
 /// The folders holding chats, with their number of chats.
@@ -1502,6 +1827,8 @@ fn draw_list(
     discussions: &[Discussion],
     // Discussions where someone is typing.
     typing: &[usize],
+    // Discussions marked for the next action.
+    marked: &[usize],
     // Name and version of the application, above the sections.
     heading: Option<(&str, &str)>,
     // Single section title; `None` for the "Pinned" / "Chats" sections.
@@ -1562,11 +1889,14 @@ fn draw_list(
             Some(Row::Chat(idx)) => {
                 let idx = *idx;
                 let discussion = &discussions[idx];
-                let title = if typing.contains(&idx) {
+                let mut title = if typing.contains(&idx) {
                     format!("{} ...", discussion.title)
                 } else {
                     discussion.title.clone()
                 };
+                if marked.contains(&idx) {
+                    title.insert_str(0, "\u{2713} ");
+                }
                 // Number of new messages in front, right-aligned in a 4-column prefix: "  ③ ", "99+ ".
                 let text = format!(
                     "{} {}",
@@ -1596,6 +1926,141 @@ fn draw_list(
         false,
     )?;
     Ok(())
+}
+
+/// The search: the query, then the chats and the messages found, the selected one in
+/// view.
+fn draw_find(
+    out: &mut impl Write,
+    discussions: &[Discussion],
+    // Chats marked for the next action.
+    marked: &[usize],
+    finding: &mut Finding,
+    help: &str,
+    w: u16,
+    h: u16,
+) -> io::Result<()> {
+    let width = w as usize;
+    let height = h as usize;
+    // The query line and a blank one above the results.
+    let viewport = height.saturating_sub(FOOTER + 2).max(1);
+    // The results under their section titles: (result index, text, styles).
+    let mut rows: Vec<(Option<usize>, String, Vec<Styled>)> = Vec::new();
+    let mut section = None;
+    for (i, found) in finding.results.iter().enumerate() {
+        let message = match found {
+            // Gone meanwhile (deleted).
+            Found::Chat(chat) if discussions[*chat].hidden => continue,
+            Found::Chat(_) => None,
+            Found::Message(chat, id) => match discussions[*chat].position_of(id) {
+                Some(msg) => Some(&discussions[*chat].messages[msg]),
+                // Gone meanwhile.
+                None => continue,
+            },
+        };
+        let title = match found {
+            Found::Chat(_) => "Chats",
+            Found::Message(..) => "Messages",
+        };
+        if section != Some(title) {
+            if section.is_some() {
+                rows.push((None, String::new(), Vec::new()));
+            }
+            rows.push((None, title.to_string(), Vec::new()));
+            section = Some(title);
+        }
+        let row = match (found, message) {
+            (Found::Chat(chat), _) => {
+                let chat = *chat;
+                let d = &discussions[chat];
+                let folder = d.folder.map(|f| format!(" \u{b7} {}", f.name()));
+                let mark = if marked.contains(&chat) {
+                    "\u{2713} "
+                } else {
+                    ""
+                };
+                let text = format!("    {mark}{}{}", d.title, folder.unwrap_or_default());
+                let styles = matched(&text, &finding.query, 4 + mark.len(), d.title.len());
+                (Some(i), text, styles)
+            }
+            (Found::Message(chat, _), m) => {
+                let (d, m) = (&discussions[*chat], m.expect("found above"));
+                let head = format!(
+                    "    {} \u{b7} {} \u{b7} ",
+                    d.title,
+                    m.timestamp.format("%b %-d, %Y")
+                );
+                let room = width.saturating_sub(ui::width_of(&head)).max(10);
+                let (snippet, range) = find::snippet(&m.text, &finding.query, room / 4, room);
+                let styles = range
+                    .map(|(s, e)| Styled {
+                        start: head.len() + s,
+                        end: head.len() + e,
+                        style: data::Style::Bold,
+                    })
+                    .into_iter()
+                    .collect();
+                (Some(i), format!("{head}{snippet}"), styles)
+            }
+        };
+        rows.push(row);
+    }
+
+    let sel_row = rows
+        .iter()
+        .position(|(i, ..)| *i == Some(finding.selected))
+        .unwrap_or(0);
+    // The section title in view with its first result.
+    let top = sel_row.saturating_sub(if sel_row <= 1 { sel_row } else { 0 });
+    if top < finding.scroll {
+        finding.scroll = top;
+    }
+    if sel_row >= finding.scroll + viewport {
+        finding.scroll = sel_row + 1 - viewport;
+    }
+
+    queue!(out, Clear(ClearType::All), cursor::Hide)?;
+    let cursor = if finding.browsing { "" } else { "\u{2588}" };
+    let query = format!("Find: {}{cursor}", finding.query);
+    let bold = Styled {
+        start: 0,
+        end: "Find:".len(),
+        style: data::Style::Bold,
+    };
+    print_styled(out, 0, &ui::pad_left(&query, width), &[bold], false)?;
+    for y in 0..viewport {
+        let Some((result, text, styles)) = rows.get(finding.scroll + y) else {
+            break;
+        };
+        let selected = *result == Some(finding.selected);
+        print_styled(
+            out,
+            (y + 2) as u16,
+            &ui::pad_left(text, width),
+            styles,
+            selected,
+        )?;
+    }
+    print_row(
+        out,
+        height.saturating_sub(1) as u16,
+        &ui::pad_left(help, width),
+        false,
+    )?;
+    Ok(())
+}
+
+/// Bold on the first match of `query` in the `len` bytes of `text` from `from`.
+fn matched(text: &str, query: &str, from: usize, len: usize) -> Vec<Styled> {
+    let (_, range) = find::snippet(&text[from..from + len], query, usize::MAX, usize::MAX);
+    range
+        .map(|(s, e)| Styled {
+            start: from + s,
+            end: from + e,
+            style: data::Style::Bold,
+        })
+        .into_iter()
+        .collect()
 }
 
 fn draw_settings(
@@ -2420,7 +2885,7 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('P'))),
-            Some(Action::PinToggled(2))
+            Some(Action::PinToggled(vec![2]))
         );
         let text = screen(&mut app);
         assert!(text.find("Bob Dupont").unwrap() < text.find("Chats").unwrap());
@@ -2918,11 +3383,13 @@ mod tests {
         };
         let family = selected(&app);
         assert_eq!(app.discussions[family].id, "family");
+        let shown = entries(&app.discussions, None, true);
+        let next = shown[shown.iter().position(|&e| e == family).unwrap() + 1];
         let mut update = Discussion::new("family", "Family");
         update.hidden = true;
         app.update_discussion(family, update);
         assert!(!screen(&mut app).contains("Family"));
-        assert_eq!(selected(&app), 0, "back to the first listed");
+        assert_eq!(selected(&app), next, "the next one in its place");
         for _ in 0..5 {
             app.handle_key(key(KeyCode::Down));
             assert_ne!(selected(&app), family);
@@ -2959,10 +3426,10 @@ mod tests {
         assert!(!screen(&mut app).contains("a archive"));
 
         app.capabilities.chat_actions = true;
-        assert!(screen(&mut app).contains("a archive   Del delete"));
+        assert!(screen(&mut app).contains("P pin   a archive   Del delete"));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('a'))),
-            Some(Action::Archive(0))
+            Some(Action::Archive(vec![0]))
         );
         app.handle_key(key(KeyCode::Delete));
         assert!(screen(&mut app).contains("Delete \u{201c}Alice Martin\u{201d}?"));
@@ -2971,11 +3438,339 @@ mod tests {
         app.handle_key(key(KeyCode::Delete));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('y'))),
-            Some(Action::DeleteChat(0))
+            Some(Action::DeleteChat(vec![0]))
         );
 
         app.hide_discussion(0);
         assert!(!screen(&mut app).contains("Alice Martin"));
+    }
+
+    #[test]
+    fn a_chat_archived_or_deleted_leaves_its_place_to_the_next_one() {
+        let mut app = app();
+        app.capabilities.chat_actions = true;
+        let selected = |app: &App| match app.screen {
+            Screen::List { selected, scroll } => (selected, scroll),
+            _ => panic!("not the chat list"),
+        };
+        app.handle_key(key(KeyCode::Down));
+        let shown = entries(&app.discussions, None, true);
+        let (archived, _) = selected(&app);
+        assert_eq!(archived, shown[1]);
+        screen(&mut app);
+        let scroll = selected(&app).1;
+
+        app.file_discussion(archived, Some(Folder::Archive));
+        assert_eq!(
+            selected(&app),
+            (shown[2], scroll),
+            "the next one, the view kept"
+        );
+        screen(&mut app);
+        assert_eq!(selected(&app).1, scroll);
+
+        app.hide_discussion(shown[2]);
+        assert_eq!(selected(&app).0, shown[3], "deleted: the next one too");
+
+        // The last chat gone: the one before is last, the next entry (a folder) selected.
+        let shown = entries(&app.discussions, None, true);
+        let last = *shown.iter().rfind(|&&e| e < app.discussions.len()).unwrap();
+        while selected(&app).0 != last {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.hide_discussion(last);
+        let place = shown.iter().position(|&e| e == last).unwrap();
+        assert_eq!(selected(&app).0, shown[place + 1]);
+    }
+
+    #[test]
+    fn marked_chats_are_pinned_archived_and_deleted_together() {
+        let mut app = app();
+        app.capabilities.chat_actions = true;
+        let shown = entries(&app.discussions, None, true);
+        let selected = |app: &App| match app.screen {
+            Screen::List { selected, .. } => selected,
+            _ => unreachable!(),
+        };
+        // Space marks and goes to the next chat: the first and third marked.
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        let text = screen(&mut app);
+        assert!(text.contains("2 marked"));
+        assert!(text.contains(&format!("\u{2713} {}", app.discussions[shown[0]].title)));
+        assert!(!text.contains(&format!("\u{2713} {}", app.discussions[shown[1]].title)));
+
+        // Esc unmarks, without quitting.
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+        assert!(!screen(&mut app).contains("marked"));
+
+        while selected(&app) != shown[0] {
+            app.handle_key(key(KeyCode::Up));
+        }
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Char(' ')));
+        let marked = vec![shown[0], shown[1]];
+        let pinned = |app: &App| {
+            marked
+                .iter()
+                .map(|&i| app.discussions[i].pinned.is_some())
+                .collect::<Vec<_>>()
+        };
+        let before = pinned(&app);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('P'))),
+            Some(Action::PinToggled(marked.clone()))
+        );
+        let after = pinned(&app);
+        assert!(
+            if before.iter().all(|&p| p) {
+                after.iter().all(|&p| !p)
+            } else {
+                after.iter().all(|&p| p)
+            },
+            "pinned unless all were: {before:?} -> {after:?}"
+        );
+        assert!(!screen(&mut app).contains("marked"), "unmarked once done");
+
+        // Marked in list order, whatever the order of marking.
+        let shown = entries(&app.discussions, None, true);
+        while selected(&app) != shown[2] {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Char(' ')));
+        while selected(&app) != shown[0] {
+            app.handle_key(key(KeyCode::Up));
+        }
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Some(Action::Archive(vec![shown[0], shown[2]]))
+        );
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Delete));
+        assert!(screen(&mut app).contains("Delete the 2 marked chats?"));
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), None);
+        assert_eq!(app.marked.len(), 2, "still marked");
+        app.handle_key(key(KeyCode::Delete));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Some(Action::DeleteChat(chats)) if chats.len() == 2
+        ));
+
+        // A marked chat moved away is no longer marked.
+        app.handle_key(key(KeyCode::Char(' ')));
+        let gone = app.marked[0];
+        app.file_discussion(gone, Some(Folder::Spam));
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn find_chats_and_messages_then_back_to_them() {
+        let mut app = app();
+        assert!(screen(&mut app).contains("/ find"));
+        app.handle_key(key(KeyCode::Down));
+        let list_selected = match app.screen {
+            Screen::List { selected, .. } => selected,
+            _ => unreachable!(),
+        };
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "ALICE");
+        let text = screen(&mut app);
+        assert!(text.contains("Find: ALICE"));
+        assert!(text.contains("Chats") && text.contains("Alice Martin"));
+        // Enter: to the results, where letters act on chats; Enter again opens.
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+        assert!(screen(&mut app).contains("Space mark"));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::Opened(0)));
+        // Back from the chat: the search as it was, then the chat list.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(screen(&mut app).contains("Find: ALICE"));
+        for _ in 0.."ALICE".len() {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "having a LOOK");
+        let text = screen(&mut app);
+        assert!(text.contains("Messages") && text.contains("Thanks, having a look."));
+        app.handle_key(key(KeyCode::Enter));
+        let Some(Action::Opened(chat)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("not opened");
+        };
+        match app.screen {
+            Screen::Discussion {
+                selected_msg,
+                selecting,
+                ..
+            } => {
+                assert!(selecting, "the message found selected");
+                assert_eq!(
+                    app.discussions[chat].messages[selected_msg].text,
+                    "Thanks, having a look."
+                );
+            }
+            _ => panic!("not in the chat"),
+        }
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::Find(_)));
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "zzz");
+        assert!(screen(&mut app).contains("Nothing found"));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::List { selected, .. } if selected == list_selected));
+    }
+
+    #[test]
+    fn chats_found_are_marked_pinned_archived_and_deleted() {
+        let mut app = app();
+        app.capabilities.chat_actions = true;
+        app.handle_key(key(KeyCode::Char('/')));
+        // Typed: letters go to the query.
+        type_text(&mut app, "a");
+        assert!(screen(&mut app).contains("Find: a\u{2588}"));
+        let Screen::Find(finding) = &app.screen else {
+            unreachable!()
+        };
+        let chats: Vec<usize> = finding
+            .results
+            .iter()
+            .filter_map(|f| match f {
+                Found::Chat(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert!(chats.len() >= 2, "{chats:?}");
+
+        // Down: the results, where letters act on chats.
+        app.handle_key(key(KeyCode::Down));
+        let text = screen(&mut app);
+        assert!(!text.contains("\u{2588}") && text.contains("Space mark"));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Char(' ')));
+        let text = screen(&mut app);
+        assert!(text.contains("2 marked"));
+        assert!(text.contains(&format!("\u{2713} {}", app.discussions[chats[0]].title)));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'))),
+            Some(Action::Archive(vec![chats[0], chats[1]]))
+        );
+        app.file_discussion(chats[0], Some(Folder::Archive));
+        assert!(
+            screen(&mut app).contains("\u{b7} Archive"),
+            "still found, in its folder"
+        );
+
+        // On a chat found: pinned, restored, deleted once confirmed.
+        while !matches!(&app.screen, Screen::Find(f) if f.selected == 0) {
+            app.handle_key(key(KeyCode::Up));
+        }
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('P'))),
+            Some(Action::PinToggled(c)) if c == [chats[0]]
+        ));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('r'))),
+            Some(Action::Restore(vec![chats[0]]))
+        );
+        app.handle_key(key(KeyCode::Delete));
+        assert!(screen(&mut app).contains("Delete \u{201c}"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Some(Action::DeleteChat(vec![chats[0]]))
+        );
+        app.hide_discussion(chats[0]);
+        assert!(matches!(app.screen, Screen::Find(_)), "the search stays");
+
+        // `/` types again; Up from the first result too.
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "l");
+        assert!(screen(&mut app).contains("Find: al"));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Up));
+        type_text(&mut app, "i");
+        assert!(screen(&mut app).contains("Find: ali"));
+    }
+
+    #[test]
+    fn pinned_chats_move_up_and_down() {
+        let mut app = app();
+        let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        let pinned = |app: &App| -> Vec<usize> {
+            order(&app.discussions, None)
+                .into_iter()
+                .filter(|&i| app.discussions[i].pinned.is_some())
+                .collect()
+        };
+        // Three pinned, the first selected.
+        for d in &mut app.discussions {
+            d.pinned = None;
+        }
+        for (rank, i) in order(&app.discussions, None).into_iter().take(3).enumerate() {
+            app.discussions[i].pinned = Some(rank as u32);
+        }
+        let before = pinned(&app);
+        assert_eq!(before.len(), 3, "{before:?}");
+        while !matches!(app.screen, Screen::List { selected, .. } if selected == before[0]) {
+            app.handle_key(key(KeyCode::Up));
+        }
+        assert_eq!(app.handle_key(shift(KeyCode::Up)), None, "first already");
+        assert_eq!(
+            app.handle_key(shift(KeyCode::Down)),
+            Some(Action::PinsReordered)
+        );
+        assert_eq!(pinned(&app), [before[1], before[0], before[2]]);
+        assert!(
+            matches!(app.screen, Screen::List { selected, .. } if selected == before[0]),
+            "the chat moved stays selected"
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)),
+            Some(Action::PinsReordered)
+        );
+        assert_eq!(pinned(&app), [before[1], before[2], before[0]]);
+        assert_eq!(app.handle_key(shift(KeyCode::Down)), None, "last already");
+
+        // Not pinned: nothing moves.
+        let unpinned = order(&app.discussions, None)
+            .into_iter()
+            .find(|&i| app.discussions[i].pinned.is_none())
+            .unwrap();
+        while !matches!(app.screen, Screen::List { selected, .. } if selected == unpinned) {
+            app.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(app.handle_key(shift(KeyCode::Up)), None);
+    }
+
+    #[test]
+    fn the_trash_is_purged_once_confirmed() {
+        let mut app = app();
+        app.capabilities.chat_actions = true;
+        app.file_discussion(1, Some(Folder::Trash));
+        app.file_discussion(2, Some(Folder::Trash));
+        assert_eq!(app.handle_key(key(KeyCode::Char('X'))), None);
+        assert!(
+            !screen(&mut app).contains("Purge"),
+            "not from the chat list"
+        );
+
+        while !matches!(app.screen, Screen::List { selected, .. } if selected == folder_entry(Folder::Trash))
+        {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert!(screen(&mut app).contains("X purge"));
+        app.handle_key(key(KeyCode::Char('X')));
+        assert!(screen(&mut app).contains("Purge the 2 chats of the trash for good?"));
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), None);
+        assert!(screen(&mut app).contains("Not purged"));
+        app.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Some(Action::PurgeTrash)
+        );
+        assert_eq!(app.trash(), [1, 2]);
     }
 
     #[test]
@@ -3000,7 +3795,7 @@ mod tests {
         let text = screen(&mut app);
         assert!(text.contains("Family Group") && text.contains("Bob Dupont"));
         assert!(!text.contains("Alice Martin"), "the inbox is not shown");
-        assert!(text.contains("r back to the inbox"));
+        assert!(text.contains("r restore"));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('a'))),
             None,
@@ -3008,7 +3803,7 @@ mod tests {
         );
         assert_eq!(
             app.handle_key(key(KeyCode::Char('r'))),
-            Some(Action::Restore(1))
+            Some(Action::Restore(vec![1]))
         );
         app.handle_key(key(KeyCode::Delete));
         assert!(screen(&mut app).contains("Delete \u{201c}Family Group\u{201d}?"));

@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEventKind};
 use crossterm::terminal;
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 
 use crate::backend::{Backend, Downloaded, Draft, Event};
 use crate::data::{self, ChatId, Discussion, MessageId};
@@ -140,41 +140,21 @@ pub async fn run(
                         }
                         continue;
                     }
-                    Action::Archive(discussion) => {
-                        let chat = &app.discussions[discussion];
-                        let title = chat.title.clone();
-                        match backend.archive(&chat.id).await {
-                            Ok(()) => {
-                                app.file_discussion(discussion, Some(data::Folder::Archive));
-                                app.set_status(format!("Archived \u{201c}{title}\u{201d}"));
-                            }
-                            Err(e) => app.set_status(format!("Archiving failed: {e}")),
-                        }
+                    Action::Archive(chats) => {
+                        file_chats(&mut app, &backend, &mut out, (w, h), ChatOp::Archive, chats).await?;
                         continue;
                     }
-                    Action::DeleteChat(discussion) => {
-                        let chat = &app.discussions[discussion];
-                        let title = chat.title.clone();
-                        match backend.delete_chat(&chat.id).await {
-                            // Its new place (trash, or gone) comes from the backend.
-                            Ok(()) => {
-                                app.hide_discussion(discussion);
-                                app.set_status(format!("Deleted \u{201c}{title}\u{201d}"));
-                            }
-                            Err(e) => app.set_status(format!("Deletion failed: {e}")),
-                        }
+                    Action::DeleteChat(chats) => {
+                        file_chats(&mut app, &backend, &mut out, (w, h), ChatOp::Delete, chats).await?;
                         continue;
                     }
-                    Action::Restore(discussion) => {
-                        let chat = &app.discussions[discussion];
-                        let title = chat.title.clone();
-                        match backend.restore(&chat.id).await {
-                            Ok(()) => {
-                                app.file_discussion(discussion, None);
-                                app.set_status(format!("\u{201c}{title}\u{201d} is back in the inbox"));
-                            }
-                            Err(e) => app.set_status(format!("Restoring failed: {e}")),
-                        }
+                    Action::PurgeTrash => {
+                        let trash = app.trash();
+                        file_chats(&mut app, &backend, &mut out, (w, h), ChatOp::Purge, trash).await?;
+                        continue;
+                    }
+                    Action::Restore(chats) => {
+                        file_chats(&mut app, &backend, &mut out, (w, h), ChatOp::Restore, chats).await?;
                         continue;
                     }
                     Action::Delete { discussion, msg } => {
@@ -210,9 +190,20 @@ pub async fn run(
                         }
                         continue;
                     }
-                    Action::PinToggled(idx) => {
-                        let chat = &app.discussions[idx];
-                        if let Err(e) = pins.set(&chat.id, chat.pinned.is_some()) {
+                    Action::PinToggled(chats) => {
+                        for idx in chats {
+                            let chat = &app.discussions[idx];
+                            if let Err(e) = pins.set(&chat.id, chat.pinned.is_some()) {
+                                app.set_status(format!("Cannot save the pinned chats: {e}"));
+                            }
+                        }
+                        continue;
+                    }
+                    Action::PinsReordered => {
+                        let mut pinned: Vec<&Discussion> =
+                            app.discussions.iter().filter(|d| d.pinned.is_some()).collect();
+                        pinned.sort_by_key(|d| d.pinned);
+                        if let Err(e) = pins.set_order(pinned.iter().map(|d| d.id.clone()).collect()) {
                             app.set_status(format!("Cannot save the pinned chats: {e}"));
                         }
                         continue;
@@ -539,4 +530,87 @@ fn escape_markup(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Chats acted on at once ([`file_chats`]).
+const CHATS_AT_ONCE: usize = 8;
+
+/// What is done to chats of the list, one by one.
+#[derive(Clone, Copy, PartialEq)]
+enum ChatOp {
+    Archive,
+    Restore,
+    Delete,
+    /// Delete, the whole trash.
+    Purge,
+}
+
+/// Does `op` on `chats`, a few at once, showing the progress when several; then says how it
+/// went.
+async fn file_chats(
+    app: &mut App,
+    backend: &impl Backend,
+    out: &mut impl Write,
+    (w, h): (u16, u16),
+    op: ChatOp,
+    chats: Vec<usize>,
+) -> io::Result<()> {
+    let (doing, done, failing) = match op {
+        ChatOp::Archive => ("Archiving", "Archived", "Archiving failed"),
+        ChatOp::Restore => ("Restoring", "Restored", "Restoring failed"),
+        ChatOp::Delete => ("Deleting", "Deleted", "Deletion failed"),
+        ChatOp::Purge => ("Purging the trash", "Purged", "Purging failed"),
+    };
+    let mut ok = 0;
+    let mut failed = None;
+    let ids: Vec<(usize, ChatId)> = chats
+        .iter()
+        .map(|&chat| (chat, app.discussions[chat].id.clone()))
+        .collect();
+    // A few at once: each waits for the phone.
+    let mut results = futures::stream::iter(ids)
+        .map(|(chat, id)| {
+            let result = match op {
+                ChatOp::Archive => backend.archive(&id).boxed_local(),
+                ChatOp::Restore => backend.restore(&id).boxed_local(),
+                ChatOp::Delete | ChatOp::Purge => backend.delete_chat(&id).boxed_local(),
+            };
+            async move { (chat, result.await) }
+        })
+        .buffer_unordered(CHATS_AT_ONCE);
+    for n in 0.. {
+        if chats.len() > 1 {
+            app.set_status(format!("{doing}\u{2026} {n}/{}", chats.len()));
+            app.draw(out, w, h)?;
+            out.flush()?;
+        }
+        let Some((chat, result)) = results.next().await else {
+            break;
+        };
+        match result {
+            Ok(()) => {
+                ok += 1;
+                match op {
+                    ChatOp::Archive => app.file_discussion(chat, Some(data::Folder::Archive)),
+                    ChatOp::Restore => app.file_discussion(chat, None),
+                    // Its new place (trash, or gone) comes from the backend.
+                    ChatOp::Delete | ChatOp::Purge => app.hide_discussion(chat),
+                }
+            }
+            Err(e) => failed = Some(e),
+        }
+    }
+    let status = match (&chats[..], failed) {
+        ([chat], None) if op == ChatOp::Restore => format!(
+            "\u{201c}{}\u{201d} is back in the inbox",
+            app.discussions[*chat].title
+        ),
+        ([chat], None) => format!("{done} \u{201c}{}\u{201d}", app.discussions[*chat].title),
+        ([_], Some(e)) => format!("{failing}: {e}"),
+        (_, None) if op == ChatOp::Restore => format!("{ok} chats are back in the inbox"),
+        (_, None) => format!("{done} {ok} chats"),
+        (_, Some(e)) => format!("{done} {ok} chats, {} failed: {e}", chats.len() - ok),
+    };
+    app.set_status(status);
+    Ok(())
 }

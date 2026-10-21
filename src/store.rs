@@ -88,6 +88,25 @@ impl Pins {
         if pinned {
             self.keys.push(chat.to_string());
         }
+        self.save()
+    }
+
+    /// Puts the pinned `chats` in this order, before the other pinned ones (unknown to
+    /// `chats`), and saves.
+    pub fn set_order(&mut self, mut chats: Vec<ChatId>) -> io::Result<()> {
+        chats.retain(|c| self.keys.contains(c));
+        let others = self
+            .keys
+            .iter()
+            .filter(|k| !chats.contains(k))
+            .cloned()
+            .collect::<Vec<_>>();
+        chats.extend(others);
+        self.keys = chats;
+        self.save()
+    }
+
+    fn save(&self) -> io::Result<()> {
         let content: String = self.keys.iter().map(|key| format!("{key}\n")).collect();
         write(&self.path, content)
     }
@@ -105,6 +124,24 @@ fn write(path: &PathBuf, content: String) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::data::Message;
+
+    #[test]
+    fn pins_are_reordered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pinned");
+        let mut pins = Pins::load(path.clone());
+        for chat in ["a", "b", "c"] {
+            pins.set(chat, true).unwrap();
+        }
+        pins.set_order(vec!["c".into(), "a".into(), "x".into()])
+            .unwrap();
+        let pins = Pins::load(path);
+        assert_eq!(
+            ["a", "b", "c", "x"].map(|c| pins.rank(c)),
+            [Some(1), Some(2), Some(0), None],
+            "reordered, b kept after, x not pinned"
+        );
+    }
 
     #[test]
     fn read_marks_count_what_came_after() {
