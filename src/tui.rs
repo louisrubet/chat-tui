@@ -890,7 +890,6 @@ impl App {
             KeyCode::Char(' ') if finding.browsing => {
                 if selected_chat != usize::MAX {
                     toggle(&mut self.marked, selected_chat);
-                    finding.selected = (finding.selected + 1).min(last);
                 }
             }
             KeyCode::Char('P' | 'a' | 'r') | KeyCode::Delete if finding.browsing => {
@@ -988,8 +987,7 @@ impl App {
                     });
                 }
                 KeyCode::Char(' ') if *selected < discussions.len() => {
-                    toggle(&mut self.marked, *selected);
-                    *selected = step(&list, *selected, 1);
+                    toggle(&mut self.marked, *selected)
                 }
                 KeyCode::Char('P' | 'a' | 'r') | KeyCode::Delete => {
                     let selected = *selected;
@@ -3492,8 +3490,10 @@ mod tests {
             Screen::List { selected, .. } => selected,
             _ => unreachable!(),
         };
-        // Space marks and goes to the next chat: the first and third marked.
+        // Space marks, staying there: the first and third marked.
         app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(selected(&app), shown[0], "still on the chat marked");
+        app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Char(' ')));
         let text = screen(&mut app);
@@ -3509,6 +3509,7 @@ mod tests {
             app.handle_key(key(KeyCode::Up));
         }
         app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Char(' ')));
         let marked = vec![shown[0], shown[1]];
         let pinned = |app: &App| {
@@ -3549,6 +3550,7 @@ mod tests {
         );
 
         app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Char(' ')));
         app.handle_key(key(KeyCode::Delete));
         assert!(screen(&mut app).contains("Delete the 2 marked chats?"));
@@ -3648,6 +3650,7 @@ mod tests {
         let text = screen(&mut app);
         assert!(!text.contains("\u{2588}") && text.contains("Space mark"));
         app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Char(' ')));
         let text = screen(&mut app);
         assert!(text.contains("2 marked"));
@@ -3707,7 +3710,11 @@ mod tests {
         for d in &mut app.discussions {
             d.pinned = None;
         }
-        for (rank, i) in order(&app.discussions, None).into_iter().take(3).enumerate() {
+        for (rank, i) in order(&app.discussions, None)
+            .into_iter()
+            .take(3)
+            .enumerate()
+        {
             app.discussions[i].pinned = Some(rank as u32);
         }
         let before = pinned(&app);
