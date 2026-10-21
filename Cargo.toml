@@ -1,6 +1,6 @@
 [package]
 name = "chat-tui"
-version = "1.8.0"
+version = "1.8.1"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Terminal chat interface shared by messaging clients"
