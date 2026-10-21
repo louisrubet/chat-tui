@@ -138,6 +138,16 @@ pub trait Backend {
         async { Err("restoring chats is not supported".into()) }
     }
 
+    /// Removes our `message` of `chat`, not sent (and sent again): from the other devices.
+    /// Nothing by default.
+    fn discard(
+        &self,
+        _chat: &ChatId,
+        _message: &Message,
+    ) -> impl Future<Output = Result<()>> + 'static {
+        async { Ok(()) }
+    }
+
     /// The address book, to start chats with.
     fn contacts(&self) -> impl Future<Output = Result<Vec<Contact>>> + 'static {
         async { Ok(Vec::new()) }

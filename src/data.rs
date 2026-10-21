@@ -35,6 +35,10 @@ pub struct Message {
     pub previews: Vec<LinkPreview>,
     /// Downloading its attachments failed (expired on the servers…).
     pub download_failed: bool,
+    /// Ours, not sent: given up by the phone or the service.
+    pub failed: bool,
+    /// Ours, being sent: shown until it is (or fails, or is cancelled).
+    pub sending: bool,
 }
 
 /// Preview of a link: title, description and image of the page.
@@ -145,6 +149,8 @@ impl Message {
             remote_attachments: Vec::new(),
             previews: Vec::new(),
             download_failed: false,
+            failed: false,
+            sending: false,
         }
     }
 
@@ -436,6 +442,8 @@ fn msg(from_me: bool, sender_name: &str, text: &str, ts: &str) -> Message {
         remote_attachments: Vec::new(),
         previews: Vec::new(),
         download_failed: false,
+        failed: false,
+        sending: false,
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //!   cargo run --example mock_tui            # `-- --open` opens the first chat
 //!
-//! A message starting with `/hang` is never sent: to try cancelling with Esc.
+//! A message starting with `/hang` is never sent: to try cancelling it (`↑`, then `c`).
 //!
 //! Its state (pins, read marks, settings) goes to a temporary directory.
 

@@ -1,12 +1,14 @@
 //! The interface running: keys and backend events in, drawing and backend calls out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write, stdout};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEventKind};
+use crossterm::event::{Event as TermEvent, EventStream};
 use crossterm::terminal;
+use futures::future::AbortHandle;
+use futures::stream::FuturesUnordered;
 use futures::{FutureExt, Stream, StreamExt};
 
 use crate::backend::{Backend, Downloaded, Draft, Event};
@@ -102,6 +104,15 @@ pub async fn run(
         );
     }
 
+    // Messages being sent, by key; their sends, and the removals of those they replace.
+    let mut sending: HashMap<u64, Sending> = HashMap::new();
+    let mut sends = FuturesUnordered::new();
+    let mut discards = FuturesUnordered::new();
+    let mut next_send = 0;
+    // Messages that never left (failed here): sent again, nothing to remove elsewhere.
+    let mut unsent: HashSet<MessageId> = HashSet::new();
+    let mut quit_asked = false;
+
     let _terminal = TerminalGuard::enter()?;
     let mut keys = EventStream::new();
     let mut out = stdout();
@@ -126,9 +137,27 @@ pub async fn run(
                     _ => None,
                 };
                 let Some(action) = action else { continue };
+                if action != Action::Quit {
+                    quit_asked = false;
+                }
 
+                // A message not sent, sent again: replaced once sent.
+                let mut resent: Option<data::Message> = None;
                 let (discussion, draft) = match action {
+                    // Messages still being sent would be lost: asked again.
+                    Action::Quit if !sending.is_empty() && !quit_asked => {
+                        quit_asked = true;
+                        app.set_status("Messages are being sent: q again to quit anyway");
+                        continue;
+                    }
                     Action::Quit => break,
+                    Action::CancelSend { discussion, msg } => {
+                        let id = &app.discussions[discussion].messages[msg].id;
+                        if let Some(send) = sending.values().find(|s| &s.placeholder == id) {
+                            send.cancel.abort();
+                        }
+                        continue;
+                    }
                     Action::React { discussion, msg, emoji, remove } => {
                         let chat = &app.discussions[discussion];
                         match backend.react(&chat.id, &chat.messages[msg], &emoji, remove).await {
@@ -272,45 +301,102 @@ pub async fn run(
                         draft.forwarded = true;
                         (to, draft)
                     }
+                    Action::Resend { discussion, msg } => {
+                        let message = &app.discussions[discussion].messages[msg];
+                        if !message.remote_attachments.is_empty() {
+                            app.set_status("Its attachments are not here: resend it from the phone");
+                            continue;
+                        }
+                        resent = Some(message.clone());
+                        // The labels of the attachments are not sent.
+                        let text = if message.attachments.is_empty() { message.text.clone() } else { String::new() };
+                        let (styles, attachments, quote) =
+                            (message.styles.clone(), message.attachments.clone(), message.reply_to);
+                        (discussion, draft(&app.discussions[discussion], text, styles, attachments, quote))
+                    }
                 };
-                app.set_status("Sending\u{2026} (Esc to cancel)");
-                app.draw(&mut out, w, h)?;
-                out.flush()?;
-
+                // Sent in the background: shown meanwhile, the next keys work as usual.
+                next_send += 1;
+                let key = next_send;
+                let chat = app.discussions[discussion].id.clone();
                 let forwarded = draft.forwarded;
                 let reply_to = draft.reply_to.as_ref().and_then(|m| app.discussions[discussion].position_of(&m.id));
-                let mut send = std::pin::pin!(backend.send(&app.discussions[discussion].id, draft));
-                // Waiting for it, whatever blocks it: Esc gives up (other keys wait).
-                let sent = loop {
-                    tokio::select! {
-                        sent = &mut send => break Some(sent),
-                        key = keys.next() => match key {
-                            Some(Ok(TermEvent::Key(key)))
-                                if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc =>
-                            {
-                                break None;
-                            }
-                            None => break None,
-                            _ => {}
-                        },
+                let retried = resent.is_some();
+                let placeholder = match &resent {
+                    // Sent again in its place.
+                    Some(old) => old.id.clone(),
+                    None => {
+                        let mut shown = data::Message::mine(format!("sending-{key}"), draft.text.clone(), reply_to, forwarded);
+                        shown.styles = draft.styles.clone();
+                        shown.attachments = draft.attachments.clone();
+                        let id = shown.id.clone();
+                        app.push_message(discussion, shown);
+                        id
                     }
                 };
-                let Some(sent) = sent else {
-                    app.set_status("Sending cancelled: it may still go out if it had left");
-                    continue;
-                };
+                if let Some(i) = app.discussions[discussion].position_of(&placeholder) {
+                    let shown = &mut app.discussions[discussion].messages[i];
+                    (shown.sending, shown.failed) = (true, false);
+                }
+                // Not sent from here at all: nothing to remove from the other devices.
+                let resent = resent.filter(|old| !unsent.remove(&old.id));
+                let (send, cancel) = futures::future::abortable(backend.send(&chat, draft));
+                sends.push(async move { (key, send.await) }.boxed_local());
+                let new = !retried;
+                sending.insert(key, Sending { chat, placeholder, new, resent, cancel });
+            }
+            Some((key, sent)) = sends.next() => {
+                let Some(done) = sending.remove(&key) else { continue };
+                let Some(idx) = app.discussions.iter().position(|d| d.id == done.chat) else { continue };
+                let shown = app.discussions[idx].position_of(&done.placeholder);
                 match sent {
-                    Ok(mut message) => {
-                        message.forwarded = forwarded;
-                        message.reply_to = reply_to;
-                        app.push_message(discussion, message);
-                        if forwarded {
-                            app.set_status(format!("Forwarded to {}", app.discussions[discussion].title));
-                        } else {
-                            app.set_status("Sent");
+                    Ok(Ok(mut message)) => {
+                        if let Some(i) = shown {
+                            let placeholder = &app.discussions[idx].messages[i];
+                            message.forwarded = placeholder.forwarded;
+                            message.reply_to = placeholder.reply_to;
+                            app.remove_message(idx, i);
+                        }
+                        let title = app.discussions[idx].title.clone();
+                        let forwarded = message.forwarded;
+                        app.push_message(idx, message);
+                        match done.resent {
+                            Some(old) => {
+                                let discard = backend.discard(&done.chat, &old);
+                                discards.push(discard.boxed_local());
+                                app.set_status(format!("Sent to {title}"));
+                            }
+                            None if forwarded => app.set_status(format!("Forwarded to {title}")),
+                            None => app.set_status(format!("Sent to {title}")),
                         }
                     }
-                    Err(e) => app.set_status(format!("Sending failed: {e}")),
+                    Ok(Err(e)) => {
+                        if let Some(i) = shown {
+                            let placeholder = &mut app.discussions[idx].messages[i];
+                            (placeholder.sending, placeholder.failed) = (false, true);
+                            if done.resent.is_none() {
+                                unsent.insert(done.placeholder.clone());
+                            }
+                        }
+                        app.set_status(format!("Not sent to {}: {e}", app.discussions[idx].title));
+                    }
+                    // Cancelled: a new message is gone, one sent again is back to not sent.
+                    Err(_) => {
+                        if let Some(i) = shown {
+                            if done.new {
+                                app.remove_message(idx, i);
+                            } else {
+                                let placeholder = &mut app.discussions[idx].messages[i];
+                                (placeholder.sending, placeholder.failed) = (false, true);
+                            }
+                        }
+                        app.set_status("Sending cancelled: it may still go out if it had left");
+                    }
+                }
+            }
+            Some(discarded) = discards.next() => {
+                if let Err(e) = discarded {
+                    app.set_status(format!("Sent, but the first try stays on the phone: {e}"));
                 }
             }
             Some((chat, id, downloaded)) = fetched.next() => {
@@ -387,6 +473,18 @@ fn draft(
     }
 }
 
+/// A message being sent.
+struct Sending {
+    chat: ChatId,
+    /// The id it is shown with meanwhile.
+    placeholder: MessageId,
+    /// Shown for this send only (not a message sent again): cancelled, it goes.
+    new: bool,
+    /// The message not sent it is sent again for: removed from the other devices once sent.
+    resent: Option<data::Message>,
+    cancel: AbortHandle,
+}
+
 /// Shows what the backend reports.
 fn handle_event(
     app: &mut App,
@@ -433,7 +531,25 @@ fn handle_event(
             let Some(idx) = position(app, &chat) else {
                 return;
             };
+            // Ours, not sent after all (the phone gave up): said.
+            let failed = messages.iter().any(|(m, _)| {
+                m.failed
+                    && app.discussions[idx]
+                        .position_of(&m.id)
+                        .is_some_and(|i| !app.discussions[idx].messages[i].failed)
+            });
             app.merge_history(idx, messages);
+            if failed {
+                let title = &app.discussions[idx].title;
+                if app.settings.notifications && !app.is_open(idx) {
+                    notify(
+                        &config.name,
+                        "Cannot send a message",
+                        &format!("A message to {title} was not sent"),
+                    );
+                }
+                app.set_status(format!("Not sent to {title}"));
+            }
             if app.is_open(idx) {
                 read(app, idx, backend, read_marks);
             } else {
@@ -553,7 +669,13 @@ fn missed_notice(app: &App, missed: &[(ChatId, MessageId)]) -> Option<(String, S
 /// Discussion `idx` was read up to its last message: here, then on the other devices.
 fn read(app: &mut App, idx: usize, backend: &impl Backend, read_marks: &mut ReadMarks) {
     let discussion = &app.discussions[idx];
-    if let Some(last) = discussion.messages.last() {
+    // Not those being sent, or not sent: unknown to the other devices.
+    if let Some(last) = discussion
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !m.sending && !m.failed)
+    {
         backend.read(&discussion.id, last);
     }
     if let Err(e) = read_marks.mark_read(discussion) {

@@ -52,6 +52,8 @@ pub struct RenderLine {
     pub kind: LineKind,
     /// Formatting of the line text.
     pub styles: Vec<Styled>,
+    /// Shown in red: something went wrong (a message not sent).
+    pub alert: bool,
 }
 
 impl RenderLine {
@@ -60,6 +62,7 @@ impl RenderLine {
             msg_idx,
             kind,
             styles: Vec::new(),
+            alert: false,
         }
     }
 }
@@ -380,7 +383,32 @@ pub fn build_discussion_lines(
                     LineKind::Right(m.reaction_summary()),
                 ));
             }
-            out.push(RenderLine::new(Some(idx), LineKind::Right(time_str)));
+            if m.failed {
+                let warning = "\u{26a0} Not sent";
+                out.push(RenderLine {
+                    styles: vec![Styled {
+                        start: 0,
+                        end: warning.len(),
+                        style: Style::Bold,
+                    }],
+                    alert: true,
+                    ..RenderLine::new(
+                        Some(idx),
+                        LineKind::Right(format!("{warning}   {time_str}")),
+                    )
+                });
+            } else if m.sending {
+                out.push(RenderLine {
+                    styles: vec![Styled {
+                        start: 0,
+                        end: "Sending\u{2026}".len(),
+                        style: Style::Italic,
+                    }],
+                    ..RenderLine::new(Some(idx), LineKind::Right("Sending\u{2026}".to_string()))
+                });
+            } else {
+                out.push(RenderLine::new(Some(idx), LineKind::Right(time_str)));
+            }
         } else {
             out.push(RenderLine::new(
                 Some(idx),
@@ -535,6 +563,20 @@ mod tests {
                 "\u{2502} example.org"
             ]
         );
+    }
+
+    #[test]
+    fn a_message_not_sent_says_so() {
+        use super::{Thumbnails, build_discussion_lines};
+        use crate::data::{Discussion, Message};
+        let mut message = Message::mine(1, "hello".to_string(), None, false);
+        message.failed = true;
+        let discussion = Discussion {
+            messages: vec![message],
+            ..Discussion::new("t", "t")
+        };
+        let lines = build_discussion_lines(&discussion, 40, None, &Thumbnails::default());
+        assert!(texts(&lines)[2].starts_with("\u{26a0} Not sent   "));
     }
 
     #[test]

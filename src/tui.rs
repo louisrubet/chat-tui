@@ -17,7 +17,7 @@ use crossterm::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, queue,
-    style::{Attribute, Print, SetAttribute},
+    style::{Attribute, Color, Print, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
@@ -84,6 +84,16 @@ pub enum Action {
     PasteImageFromClipboard,
     /// Download the received attachments of message `msg` of `discussion`, then open them.
     FetchAttachments {
+        discussion: usize,
+        msg: usize,
+    },
+    /// Send message `msg` of `discussion` again, not sent: the new one replaces it.
+    Resend {
+        discussion: usize,
+        msg: usize,
+    },
+    /// Stop sending message `msg` of `discussion` (it may have left already).
+    CancelSend {
         discussion: usize,
         msg: usize,
     },
@@ -638,6 +648,36 @@ impl App {
     /// was selected; otherwise a received message marks it unread.
     /// Adds `message` to `discussion`; one it has already (same id: sent here and received
     /// back, updated…) is replaced, not counted as new.
+    /// Removes message `msg` of `discussion`: the replies to it lose their quote, the
+    /// selection stays on the same message (or the one after).
+    pub fn remove_message(&mut self, discussion: usize, msg: usize) {
+        let target = &mut self.discussions[discussion];
+        if msg >= target.messages.len() {
+            return;
+        }
+        target.messages.remove(msg);
+        for m in &mut target.messages {
+            m.reply_to = match m.reply_to {
+                Some(i) if i == msg => None,
+                Some(i) if i > msg => Some(i - 1),
+                other => other,
+            };
+        }
+        let last = target.messages.len().saturating_sub(1);
+        if let Screen::Discussion {
+            discussion_idx,
+            selected_msg,
+            ..
+        } = &mut self.screen
+            && *discussion_idx == discussion
+        {
+            if *selected_msg > msg {
+                *selected_msg -= 1;
+            }
+            *selected_msg = (*selected_msg).min(last);
+        }
+    }
+
     pub fn push_message(&mut self, discussion: usize, message: Message) {
         let open = self.is_open(discussion);
         let target = &mut self.discussions[discussion];
@@ -1396,9 +1436,21 @@ impl App {
                         // Actions need a selected message, and there is nothing to act on in a
                         // deleted one. With no selection, their letters start a new message.
                         KeyCode::Delete if !*selecting => {}
-                        KeyCode::Char('r' | 'f' | 'c' | 'o' | 'e') | KeyCode::Delete
+                        KeyCode::Char('c')
                             if *selecting
-                                && messages.get(*selected_msg).is_none_or(|m| m.deleted) => {}
+                                && messages.get(*selected_msg).is_some_and(|m| m.sending) =>
+                        {
+                            return Some(Action::CancelSend {
+                                discussion: *discussion_idx,
+                                msg: *selected_msg,
+                            });
+                        }
+                        // Nor in one being sent: it has no id yet.
+                        KeyCode::Char('r' | 'f' | 'c' | 'o' | 'e' | 's') | KeyCode::Delete
+                            if *selecting
+                                && messages
+                                    .get(*selected_msg)
+                                    .is_none_or(|m| m.deleted || m.sending) => {}
                         KeyCode::Delete if *selecting => {
                             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
                             self.status = match self.capabilities.delete_max_age {
@@ -1416,6 +1468,12 @@ impl App {
                                     }
                                 }
                             };
+                        }
+                        KeyCode::Char('s') if *selecting && messages[*selected_msg].failed => {
+                            return Some(Action::Resend {
+                                discussion: *discussion_idx,
+                                msg: *selected_msg,
+                            });
                         }
                         KeyCode::Char('e') if *selecting => *reacting = Some(Picker::default()),
                         KeyCode::Char('r') if *selecting => {
@@ -1816,6 +1874,18 @@ fn print_styled(
     styles: &[Styled],
     selected: bool,
 ) -> io::Result<()> {
+    print_line(out, y, text, styles, selected, false)
+}
+
+/// [`print_styled`], in red if `alert`.
+fn print_line(
+    out: &mut impl Write,
+    y: u16,
+    text: &str,
+    styles: &[Styled],
+    selected: bool,
+    alert: bool,
+) -> io::Result<()> {
     queue!(out, cursor::MoveTo(0, y))?;
     let mut cuts: Vec<usize> = styles
         .iter()
@@ -1831,6 +1901,9 @@ fn print_styled(
             continue;
         }
         queue!(out, SetAttribute(Attribute::Reset))?;
+        if alert {
+            queue!(out, SetForegroundColor(Color::Red))?;
+        }
         if selected {
             queue!(out, SetAttribute(Attribute::Reverse))?;
         }
@@ -2521,7 +2594,19 @@ fn draw_discussion(
                 )]
             }
             None => {
-                let help = if selecting {
+                let failed = discussion
+                    .messages
+                    .get(selected_msg)
+                    .is_some_and(|m| m.failed && !m.deleted);
+                let sending = discussion
+                    .messages
+                    .get(selected_msg)
+                    .is_some_and(|m| m.sending);
+                let help = if selecting && sending {
+                    "\u{2191}/\u{2193} navigate   c cancel sending   Enter new message   Esc unselect   q quit"
+                } else if selecting && failed {
+                    "\u{2191}/\u{2193} navigate   s resend   c copy   Enter new message   Esc unselect   q quit"
+                } else if selecting {
                     "\u{2191}/\u{2193} navigate   r reply   e react   f forward   c copy   o open links   Del delete   Enter new message   Esc unselect   q quit"
                 } else {
                     "\u{2191} select   Enter new message   Esc back   q quit"
@@ -2586,7 +2671,7 @@ fn draw_discussion(
             let selected = selecting
                 && rl.msg_idx == Some(selected_msg)
                 && !matches!(rl.kind, ui::LineKind::Image { .. });
-            print_styled(out, y, &text, &styles, selected)?;
+            print_line(out, y, &text, &styles, selected, rl.alert)?;
         } else {
             print_row(out, y, &" ".repeat(width), false)?;
         }
@@ -4111,9 +4196,16 @@ mod tests {
     #[test]
     fn new_chat_with_contacts_and_numbers() {
         let mut app = App::new(data::mock_discussions());
-        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), None, "not supported");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('n'))),
+            None,
+            "not supported"
+        );
         app.capabilities.new_chat = true;
-        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Some(Action::NewChat));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('n'))),
+            Some(Action::NewChat)
+        );
         let contact = |name: &str, number: &str| Contact {
             name: name.to_string(),
             number: number.to_string(),
@@ -4152,7 +4244,71 @@ mod tests {
         assert_eq!(app.started(idx), Action::Opened(idx));
         assert!(matches!(
             app.screen,
-            Screen::Discussion { composing: Some(_), .. }
+            Screen::Discussion {
+                composing: Some(_),
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn a_message_not_sent_is_resent_then_removed() {
+        let mut app = selected();
+        let mine = app.discussions[0]
+            .messages
+            .iter()
+            .rposition(|m| m.from_me)
+            .unwrap();
+        assert!(mine > 0);
+        while !matches!(app.screen, Screen::Discussion { selected_msg, .. } if selected_msg == mine)
+        {
+            app.handle_key(key(KeyCode::Up));
+        }
+        app.discussions[0].messages[mine].failed = true;
+        let text = screen(&mut app);
+        assert!(text.contains("\u{26a0} Not sent") && text.contains("s resend"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            Some(Action::Resend {
+                discussion: 0,
+                msg: mine
+            })
+        );
+        app.discussions[0].messages[mine].reply_to = Some(mine - 1);
+        app.remove_message(0, mine - 1);
+        assert_eq!(
+            app.discussions[0].messages[mine - 1].reply_to,
+            None,
+            "its quote gone"
+        );
+        assert!(
+            matches!(app.screen, Screen::Discussion { selected_msg, .. } if selected_msg == mine - 1),
+            "the same one selected"
+        );
+    }
+
+    #[test]
+    fn a_message_being_sent_can_be_cancelled() {
+        let mut app = selected();
+        let last = app.discussions[0].messages.len() - 1;
+        app.discussions[0].messages[last].sending = true;
+        let text = screen(&mut app);
+        assert!(text.contains("Sending\u{2026}") && text.contains("c cancel sending"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('r'))),
+            None,
+            "no reply to it yet"
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('c'))),
+            Some(Action::CancelSend {
+                discussion: 0,
+                msg: last
+            })
+        );
+        // Esc goes back as usual, the message still being sent.
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::List { .. }));
     }
 }
