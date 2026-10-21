@@ -102,6 +102,7 @@ fn main() -> io::Result<()> {
     std::fs::write(state.join("read"), marks)?;
     let config = Config {
         name: "chat-tui mock".to_string(),
+        version: format!("v{}", env!("CARGO_PKG_VERSION")),
         settings: state.join("settings"),
         read_marks: state.join("read"),
         pins: state.join("pinned"),

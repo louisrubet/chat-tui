@@ -21,6 +21,8 @@ use crate::tui::{Action, App, TerminalGuard};
 pub struct Config {
     /// Name of the application, shown in its desktop notifications.
     pub name: String,
+    /// Version of the application, after its name above the chat list; none if empty.
+    pub version: String,
     pub settings: PathBuf,
     /// When each chat was last read.
     pub read_marks: PathBuf,
@@ -36,6 +38,7 @@ impl Config {
         let state = xdg_dir("XDG_DATA_HOME", ".local/share")?.join(name);
         Ok(Config {
             name: name.to_string(),
+            version: String::new(),
             settings: xdg_dir("XDG_CONFIG_HOME", ".config")?
                 .join(name)
                 .join("settings"),
@@ -73,6 +76,7 @@ pub async fn run(
     }
     let mut app = App::new(discussions);
     app.name = config.name.clone();
+    app.version = config.version.clone();
     app.settings = Settings::load(&config.settings);
     app.thumbnails = Thumbnails::detect();
     app.capabilities = backend.capabilities();

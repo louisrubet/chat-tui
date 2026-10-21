@@ -284,6 +284,8 @@ struct Typing {
 pub struct App {
     /// Name of the application, shown in bold above the chat list; none if empty.
     pub name: String,
+    /// Version of the application, after its name; none if empty.
+    pub version: String,
     pub discussions: Vec<Discussion>,
     pub settings: Settings,
     typing: Vec<Typing>,
@@ -316,6 +318,7 @@ impl App {
             .unwrap_or(0);
         App {
             name: String::new(),
+            version: String::new(),
             discussions,
             settings: Settings::default(),
             typing: Vec::new(),
@@ -1199,7 +1202,8 @@ impl App {
                 out,
                 &self.discussions,
                 &typing,
-                Some(self.name.as_str()).filter(|name| !name.is_empty()),
+                Some((self.name.as_str(), self.version.as_str()))
+                    .filter(|(name, _)| !name.is_empty()),
                 None,
                 self.folder,
                 true,
@@ -1436,8 +1440,8 @@ fn step(entries: &[usize], selected: usize, delta: isize) -> usize {
 
 /// A line of the chat list.
 enum Row<'a> {
-    /// The name of the application, above the sections.
-    Heading(&'a str),
+    /// The name and version of the application, above the sections.
+    Heading(&'a str, &'a str),
     Title(&'a str),
     Blank,
     Chat(usize),
@@ -1450,7 +1454,7 @@ enum Row<'a> {
 /// "Chats" when nothing is pinned), followed by the folders if `with_folders`.
 fn list_rows<'a>(
     discussions: &[Discussion],
-    heading: Option<&'a str>,
+    heading: Option<(&'a str, &'a str)>,
     title: Option<&'a str>,
     folder: Option<Folder>,
     with_folders: bool,
@@ -1460,7 +1464,10 @@ fn list_rows<'a>(
         .iter()
         .filter(|&&i| discussions[i].pinned.is_some())
         .count();
-    let mut rows: Vec<_> = heading.map(Row::Heading).into_iter().collect();
+    let mut rows: Vec<_> = heading
+        .map(|(name, version)| Row::Heading(name, version))
+        .into_iter()
+        .collect();
     let section = |rows: &mut Vec<Row<'a>>, title: &'a str, chats: &[usize]| {
         if !rows.is_empty() {
             rows.push(Row::Blank);
@@ -1495,8 +1502,8 @@ fn draw_list(
     discussions: &[Discussion],
     // Discussions where someone is typing.
     typing: &[usize],
-    // Name of the application, above the sections.
-    heading: Option<&str>,
+    // Name and version of the application, above the sections.
+    heading: Option<(&str, &str)>,
     // Single section title; `None` for the "Pinned" / "Chats" sections.
     title: Option<&str>,
     // The folder shown, `None` for the inbox (followed by the folders if `with_folders`).
@@ -1537,8 +1544,12 @@ fn draw_list(
     queue!(out, Clear(ClearType::All), cursor::Hide)?;
     for y in 0..viewport {
         let text = match rows.get(*scroll + y) {
-            Some(Row::Heading(name)) => {
-                let text = ui::pad_left(name, width);
+            Some(Row::Heading(name, version)) => {
+                let text = if version.is_empty() {
+                    ui::pad_left(name, width)
+                } else {
+                    ui::pad_left(&format!("{name} {version}"), width)
+                };
                 let bold = Styled {
                     start: 0,
                     end: name.len().min(text.len()),
@@ -2647,13 +2658,21 @@ mod tests {
     #[test]
     fn the_application_name_heads_the_list() {
         let mut app = app();
-        assert!(!screen(&mut app).contains("signal-tui"), "no name, no heading");
+        assert!(
+            !screen(&mut app).contains("signal-tui"),
+            "no name, no heading"
+        );
         app.name = "signal-tui".to_string();
         let text = screen(&mut app);
         assert!(text.find("signal-tui").unwrap() < text.find("Pinned").unwrap());
         app.handle_key(key(KeyCode::Char('P')));
         let text = screen(&mut app);
         assert!(text.find("signal-tui").unwrap() < text.find("Chats").unwrap());
+        app.version = "v1.4.0+dfa66".to_string();
+        assert!(
+            screen(&mut app).contains("signal-tui v1.4.0+dfa66"),
+            "on the same line"
+        );
     }
 
     #[test]
@@ -2671,7 +2690,10 @@ mod tests {
             app.handle_key(key(KeyCode::Up));
         }
         let before = screen(&mut app);
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::Opened(40)));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Action::Opened(40))
+        );
         screen(&mut app);
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(screen(&mut app), before);
