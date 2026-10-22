@@ -638,16 +638,26 @@ impl App {
         self.typing.retain(|t| t.until > now);
     }
 
+    /// The chat being written to, and the text typed so far.
+    pub fn draft(&self) -> Option<(&crate::data::ChatId, &str)> {
+        match &self.screen {
+            Screen::Discussion {
+                discussion_idx,
+                composing: Some(compose),
+                ..
+            } => Some((
+                &self.discussions.get(*discussion_idx)?.id,
+                compose.editor.text(),
+            )),
+            _ => None,
+        }
+    }
+
     /// Whether `discussion` is the one shown (also while forwarding from it).
     pub fn is_open(&self, discussion: usize) -> bool {
         matches!(self.screen, Screen::Discussion { discussion_idx, .. } if discussion_idx == discussion)
     }
 
-    /// Appends a message to a discussion. If that discussion is open, the selection follows
-    /// the new message when it is ours (and is then hidden) or when the previous last message
-    /// was selected; otherwise a received message marks it unread.
-    /// Adds `message` to `discussion`; one it has already (same id: sent here and received
-    /// back, updated…) is replaced, not counted as new.
     /// Removes message `msg` of `discussion`: the replies to it lose their quote, the
     /// selection stays on the same message (or the one after).
     pub fn remove_message(&mut self, discussion: usize, msg: usize) {
@@ -678,6 +688,11 @@ impl App {
         }
     }
 
+    /// Appends a message to a discussion. If that discussion is open, the selection follows
+    /// the new message when it is ours (and is then hidden) or when the previous last message
+    /// was selected; otherwise a received message marks it unread.
+    /// Adds `message` to `discussion`; one it has already (same id: sent here and received
+    /// back, updated…) is replaced, not counted as new.
     pub fn push_message(&mut self, discussion: usize, message: Message) {
         let open = self.is_open(discussion);
         let target = &mut self.discussions[discussion];
@@ -1451,6 +1466,9 @@ impl App {
                                 && messages
                                     .get(*selected_msg)
                                     .is_none_or(|m| m.deleted || m.sending) => {}
+                        KeyCode::Delete if *selecting && self.capabilities.delete_for_me => {
+                            *deleting = true;
+                        }
                         KeyCode::Delete if *selecting => {
                             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
                             self.status = match self.capabilities.delete_max_age {
@@ -1754,7 +1772,11 @@ impl App {
                     scroll,
                     composing.as_deref(),
                     reacting.as_ref(),
-                    *deleting,
+                    deleting.then_some(if self.capabilities.delete_for_me {
+                        "for you"
+                    } else {
+                        "for everyone"
+                    }),
                     self.status.as_deref(),
                     w,
                     h,
@@ -2499,8 +2521,8 @@ fn draw_discussion(
     composing: Option<&Compose>,
     // The reaction picker, while picking.
     reacting: Option<&Picker>,
-    // Asking to confirm the deletion of the selected message.
-    deleting: bool,
+    // Asking to confirm the deletion of the selected message: for whom.
+    deleting: Option<&str>,
     status: Option<&str>,
     w: u16,
     h: u16,
@@ -2587,9 +2609,9 @@ fn draw_discussion(
                 lines.push((prompt, Vec::new()));
                 lines
             }
-            None if deleting => {
+            None if let Some(whom) = deleting => {
                 vec![(
-                    "Delete this message for everyone?   y yes   any other key: no".to_string(),
+                    format!("Delete this message {whom}?   y yes   any other key: no"),
                     Vec::new(),
                 )]
             }
@@ -3443,6 +3465,38 @@ mod tests {
         app.handle_key(key(KeyCode::Up));
         app.handle_key(key(KeyCode::Delete));
         assert!(screen(&mut app).contains("Only your messages of the last 24 h"));
+    }
+
+    #[test]
+    fn delete_any_message_for_me_after_confirmation() {
+        let mut app = opened();
+        app.capabilities.delete_for_me = true;
+        // An old message of someone else: deletable for us.
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Up));
+        let selected = match app.screen {
+            Screen::Discussion { selected_msg, .. } => selected_msg,
+            _ => unreachable!(),
+        };
+        app.handle_key(key(KeyCode::Delete));
+        assert!(screen(&mut app).contains("Delete this message for you?"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Some(Action::Delete {
+                discussion: 0,
+                msg: selected
+            })
+        );
+    }
+
+    #[test]
+    fn the_draft_is_the_text_being_typed() {
+        let mut app = opened();
+        assert_eq!(app.draft(), None);
+        app.handle_key(key(KeyCode::Enter));
+        type_text(&mut app, "hi");
+        let id = app.discussions[0].id.clone();
+        assert_eq!(app.draft(), Some((&id, "hi")));
     }
 
     #[test]

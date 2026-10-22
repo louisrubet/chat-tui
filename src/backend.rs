@@ -15,6 +15,9 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub struct Capabilities {
     /// How long after sending our messages can be deleted for everyone; `None`: never.
     pub delete_max_age: Option<Duration>,
+    /// Whether any message can be deleted for us only (from our devices), instead of ours
+    /// for everyone: [`Backend::delete`] then removes it from the chat.
+    pub delete_for_me: bool,
     /// Whether chats can be archived, deleted and restored ([`Backend::archive`],
     /// [`Backend::delete_chat`], [`Backend::restore`]).
     pub chat_actions: bool,
@@ -108,7 +111,8 @@ pub trait Backend {
         remove: bool,
     ) -> impl Future<Output = Result<()>> + 'static;
 
-    /// Deletes our `message` for everyone.
+    /// Deletes our `message` for everyone; with [`Capabilities::delete_for_me`], deletes
+    /// `message` (any) for us only.
     fn delete(
         &self,
         chat: &ChatId,
@@ -165,4 +169,8 @@ pub trait Backend {
     /// `chat` was read here up to its `last` message: for the other devices to know.
     /// Nothing by default.
     fn read(&self, _chat: &ChatId, _last: &Message) {}
+
+    /// We are typing in `chat`: said while we do, every few seconds at most. Nothing by
+    /// default.
+    fn typing(&self, _chat: &ChatId) {}
 }

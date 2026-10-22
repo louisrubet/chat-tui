@@ -26,6 +26,7 @@ impl Backend for Mock {
             delete_max_age: Some(Duration::from_secs(24 * 60 * 60)),
             chat_actions: true,
             new_chat: true,
+            ..Capabilities::default()
         }
     }
 

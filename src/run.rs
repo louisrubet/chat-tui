@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write, stdout};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event as TermEvent, EventStream};
 use crossterm::terminal;
@@ -17,6 +17,9 @@ use crate::graphics::Thumbnails;
 use crate::settings::Settings;
 use crate::store::{Pins, ReadMarks};
 use crate::tui::{Action, App, TerminalGuard};
+
+/// How often we say we are typing, while we do.
+const TYPING_EVERY: Duration = Duration::from_secs(3);
 
 /// Where an application keeps its state.
 #[derive(Debug, Clone)]
@@ -112,6 +115,9 @@ pub async fn run(
     // Messages that never left (failed here): sent again, nothing to remove elsewhere.
     let mut unsent: HashSet<MessageId> = HashSet::new();
     let mut quit_asked = false;
+    // The draft last seen, and when we last said we were typing (and where).
+    let mut last_draft = String::new();
+    let mut typing_said: Option<(ChatId, Instant)> = None;
 
     let _terminal = TerminalGuard::enter()?;
     let mut keys = EventStream::new();
@@ -136,6 +142,21 @@ pub async fn run(
                     }
                     _ => None,
                 };
+                // Typing (the draft changed, not emptied): said, every few seconds at most.
+                match app.draft() {
+                    Some((chat, text)) if !text.is_empty() && text != last_draft => {
+                        let said_lately = typing_said.as_ref().is_some_and(|(c, at)| {
+                            c == chat && at.elapsed() < TYPING_EVERY
+                        });
+                        if !said_lately {
+                            backend.typing(chat);
+                            typing_said = Some((chat.clone(), Instant::now()));
+                        }
+                        last_draft = text.to_string();
+                    }
+                    Some((_, text)) => last_draft = text.to_string(),
+                    None => last_draft.clear(),
+                }
                 let Some(action) = action else { continue };
                 if action != Action::Quit {
                     quit_asked = false;
@@ -231,6 +252,10 @@ pub async fn run(
                     Action::Delete { discussion, msg } => {
                         let chat = &app.discussions[discussion];
                         match backend.delete(&chat.id, &chat.messages[msg]).await {
+                            // For us only: gone.
+                            Ok(()) if backend.capabilities().delete_for_me => {
+                                app.remove_message(discussion, msg)
+                            }
                             Ok(()) => app.discussions[discussion].messages[msg].mark_deleted(),
                             Err(e) => app.set_status(format!("Deletion failed: {e}")),
                         }
