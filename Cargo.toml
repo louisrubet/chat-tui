@@ -4,7 +4,7 @@ version = "1.11.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Terminal chat interface shared by messaging clients"
-repository = "https://github.com/louisrubet/chat-tui"
+repository = "https://github.com/louisrubet/chat-tui-core"
 
 [dependencies]
 crossterm = { version = "0.28", features = ["event-stream"] }

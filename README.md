@@ -1,6 +1,6 @@
-# chat-tui
+# chat-tui-core
 
-The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal-tui) and google-messages-tui, as a library: each client brings its service, chat-tui does the rest.
+The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal-tui) and [gmessages-tui](https://github.com/louisrubet/gmessages-tui), as a library: each client brings its service, chat-tui does the rest.
 
 - **Chat list** with pinned chats and unread counts
 - **Discussions**: replies, forwards, deletion, `**bold**` `*italic*` `~strikethrough~`
@@ -12,7 +12,7 @@ The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal
 
 ```toml
 [dependencies]
-chat-tui = { git = "https://github.com/louisrubet/chat-tui", tag = "v1.3.1" }
+chat-tui = { git = "https://github.com/louisrubet/chat-tui-core", tag = "v1.11.0" }
 ```
 
 Implement [`Backend`](src/backend.rs) for your service, load the chats, then run:
@@ -47,8 +47,8 @@ Tagged `vX.Y.Z` (semver), clients pin a tag: a major bump breaks the API, see th
 To work on chat-tui and a client together, point the client at a checkout, without committing it:
 
 ```toml
-[patch."https://github.com/louisrubet/chat-tui"]
-chat-tui = { path = "../chat-tui" }
+[patch."https://github.com/louisrubet/chat-tui-core"]
+chat-tui = { path = "../chat-tui-core" }
 ```
 
 ## Dev
