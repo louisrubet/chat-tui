@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.11.1
+
+- Published on crates.io as `chat-tui-core` (the name chat-tui was taken there); the library is still `chat_tui`. The GitHub repository is renamed chat-tui-core too.
+- emoji-expander 1.2.1, from crates.io.
+
+## v1.11.0
+
+- Deleting any message for oneself (`Capabilities::delete_for_me`); typing told to the backend (`Backend::typing`).
+
+## v1.10.0
+
+- Messages sent in the background, cancelled with `c`; those not sent shown in red, notified, sent again with `s`.
+
+## v1.9.0
+
+- New chats with contacts or numbers; one notification for the messages missed.
+
+## v1.8.1
+
+- Space marks a chat without moving to the next one.
+
+## v1.8.0
+
+- Find, marks and batch actions, purge of the trash, order of the pinned chats.
+
+## v1.7.0
+
+- The version of the application beside its name.
+
+## v1.6.0
+
+- Archive, spam and trash folders.
+
+## v1.5.0
+
+- Archiving and deleting chats.
+
+## v1.4.0
+
+- Hidden chats; chats read on other devices.
+
+## v1.3.2
+
+- Images of live messages fetched on arrival.
+
 ## v1.3.1
 
 - Back from a chat or the parameters, the chat list keeps its view: the chat left is no longer pushed to the last row.

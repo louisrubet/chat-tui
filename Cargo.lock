@@ -250,8 +250,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "chat-tui"
-version = "1.11.0"
+name = "chat-tui-core"
+version = "1.11.1"
 dependencies = [
  "arboard",
  "base64",
@@ -285,9 +285,9 @@ dependencies = [
 
 [[package]]
 name = "clipboard-win"
-version = "5.4.1"
+version = "5.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+checksum = "052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a"
 dependencies = [
  "error-code",
 ]
@@ -395,8 +395,8 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "emoji-expander"
-version = "1.2.0"
-source = "git+https://github.com/louisrubet/emoji-expander?tag=v1.2.0#edb9cf2230dd00e4407d188884374b5496dc7047"
+version = "1.2.1"
+source = "git+https://github.com/louisrubet/emoji-expander?tag=v1.2.1#545cb53917ed28b9663ec8014cdbdd49b8f88a84"
 dependencies = [
  "lazy_static",
 ]

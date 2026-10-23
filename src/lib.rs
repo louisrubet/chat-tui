@@ -1,5 +1,5 @@
 //! A terminal chat interface, shared by messaging clients (signal-tui,
-//! google-messages-tui…): chat list, discussions with thumbnails and link previews,
+//! gmessages-tui…): chat list, discussions with thumbnails and link previews,
 //! replies, reactions, an fzf-style emoji picker.
 //!
 //! A client implements [`Backend`] for its service, loads the chats, then calls [`run`]

@@ -1,6 +1,6 @@
 # chat-tui-core
 
-The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal-tui) and [gmessages-tui](https://github.com/louisrubet/gmessages-tui), as a library: each client brings its service, chat-tui does the rest.
+The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal-tui) and [gmessages-tui](https://github.com/louisrubet/gmessages-tui), as a library: each client brings its service, chat-tui-core does the rest.
 
 - **Chat list** with pinned chats and unread counts
 - **Discussions**: replies, forwards, deletion, `**bold**` `*italic*` `~strikethrough~`
@@ -12,8 +12,10 @@ The terminal chat interface of [signal-tui](https://github.com/louisrubet/signal
 
 ```toml
 [dependencies]
-chat-tui = { git = "https://github.com/louisrubet/chat-tui-core", tag = "v1.11.0" }
+chat-tui = { package = "chat-tui-core", version = "1.11" }
 ```
+
+The crate is `chat-tui-core` on [crates.io](https://crates.io/crates/chat-tui-core) (the name chat-tui was taken there), and its library is `chat_tui`: the line above keeps that name in your code.
 
 Implement [`Backend`](src/backend.rs) for your service, load the chats, then run:
 
@@ -34,7 +36,7 @@ chat_tui::run(service, chats, events, config).await?;   // in a tokio LocalSet
 - `events`: a `Stream` of `Event`s: messages received, reactions, deletions, typing, new chats.
 - The `Backend` futures are `'static` and need not be `Send`: clone your client into them.
 
-chat-tui keeps the settings, the pinned chats and the read marks; your client keeps its account and store.
+chat-tui-core keeps the settings, the pinned chats and the read marks; your client keeps its account and store.
 
 ## Terminal
 
@@ -44,11 +46,11 @@ Any terminal works; thumbnails need the kitty graphics protocol with Unicode pla
 
 Tagged `vX.Y.Z` (semver), clients pin a tag: a major bump breaks the API, see the [changelog](CHANGELOG.md).
 
-To work on chat-tui and a client together, point the client at a checkout, without committing it:
+To work on chat-tui-core and a client together, point the client at a checkout, without committing it (in its `.cargo/config.toml`, for instance):
 
 ```toml
-[patch."https://github.com/louisrubet/chat-tui-core"]
-chat-tui = { path = "../chat-tui-core" }
+[patch.crates-io]
+chat-tui-core = { path = "../chat-tui-core" }
 ```
 
 ## Dev
